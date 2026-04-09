@@ -2,7 +2,7 @@ import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router
 import { Toaster } from 'react-hot-toast'
 import {
   LayoutDashboard, CalendarDays, Settings, BarChart3,
-  Zap, Users, ChevronRight, Sparkles
+  Zap, Users, ChevronRight, Sparkles, GraduationCap
 } from 'lucide-react'
 import clsx from 'clsx'
 import Dashboard   from './pages/Dashboard'
@@ -11,6 +11,7 @@ import Timetable   from './pages/Timetable'
 import WhatIf      from './pages/WhatIf'
 import Analytics   from './pages/Analytics'
 import StudentView from './pages/StudentView'
+import TeacherView from './pages/TeacherView'
 
 const NAV = [
   { to: '/',          icon: LayoutDashboard, label: 'Dashboard'   },
@@ -18,7 +19,8 @@ const NAV = [
   { to: '/timetable', icon: CalendarDays,    label: 'Timetable'   },
   { to: '/what-if',   icon: Zap,             label: 'What-If'     },
   { to: '/analytics', icon: BarChart3,       label: 'Analytics'   },
-  { to: '/student',   icon: Users,           label: 'Student View' },
+  { to: '/student',   icon: GraduationCap,   label: 'Student View' },
+  { to: '/teacher',   icon: Users,           label: 'Teacher View' },
 ]
 
 function Sidebar() {
@@ -91,7 +93,6 @@ export default function App() {
         }}
       />
       <Routes>
-        <Route path="/student/:ttId?" element={<StudentView />} />
         <Route path="*" element={
           <Layout>
             <Routes>
@@ -100,6 +101,8 @@ export default function App() {
               <Route path="/timetable" element={<Timetable />}   />
               <Route path="/what-if"   element={<WhatIf />}      />
               <Route path="/analytics" element={<Analytics />}   />
+              <Route path="/student"   element={<StudentView />} />
+              <Route path="/teacher"   element={<TeacherView />} />
             </Routes>
           </Layout>
         } />

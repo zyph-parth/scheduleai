@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { API, getErrorMessage, type Department, type Institution, type Section, type Slot, type ViewerTimetable } from '../api/client'
+import { API, getErrorMessage, type Department, type Institution, type Slot, type ViewerTimetable } from '../api/client'
 import toast from 'react-hot-toast'
-import { BookOpen, Clock, DoorOpen, GraduationCap, Search, User } from 'lucide-react'
+import { BookOpen, Clock, DoorOpen, Search, Users } from 'lucide-react'
 import clsx from 'clsx'
 
 const DAY_LABELS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
@@ -23,14 +23,13 @@ function formatTimeRange(startTime: string, period: number, durationMinutes: num
   return `${format(startTotal)} - ${format(endTotal)}`
 }
 
-export default function StudentView() {
+export default function TeacherView() {
   const [institutions, setInstitutions] = useState<Institution[]>([])
   const [departments, setDepartments] = useState<Department[]>([])
-  const [sections, setSections] = useState<Section[]>([])
+  const [facultyOptions, setFacultyOptions] = useState<Array<{ id: number; name: string }>>([])
   const [selInst, setSelInst] = useState<number | null>(null)
   const [selDept, setSelDept] = useState<number | null>(null)
-  const [semester, setSemester] = useState<number | null>(null)
-  const [selSection, setSelSection] = useState<number | null>(null)
+  const [selFaculty, setSelFaculty] = useState<number | null>(null)
   const [view, setView] = useState<ViewerTimetable | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -46,9 +45,8 @@ export default function StudentView() {
   useEffect(() => {
     setView(null)
     setSelDept(null)
-    setSemester(null)
-    setSelSection(null)
-    setSections([])
+    setSelFaculty(null)
+    setFacultyOptions([])
     if (!selInst) {
       setDepartments([])
       return
@@ -63,40 +61,18 @@ export default function StudentView() {
 
   useEffect(() => {
     setView(null)
-    setSemester(null)
-    setSelSection(null)
-    if (!selDept) {
-      setSections([])
+    setSelFaculty(null)
+    if (!selInst || !selDept) {
+      setFacultyOptions([])
       return
     }
-    API.getSections(selDept)
+    API.getTeacherFacultyOptions(selInst, selDept)
       .then((data) => {
-        setSections(data)
-        const semesters = Array.from(new Set(data.map((section) => section.semester))).sort((a, b) => a - b)
-        if (semesters.length) setSemester(semesters[0])
+        setFacultyOptions(data)
+        if (data.length) setSelFaculty(data[0].id)
       })
-      .catch((error) => toast.error(getErrorMessage(error, 'Failed to load sections')))
-  }, [selDept])
-
-  const semesterOptions = useMemo(
-    () => Array.from(new Set(sections.map((section) => section.semester))).sort((a, b) => a - b),
-    [sections],
-  )
-
-  const visibleSections = useMemo(
-    () => sections.filter((section) => semester === null || section.semester === semester),
-    [sections, semester],
-  )
-
-  useEffect(() => {
-    if (!visibleSections.length) {
-      setSelSection(null)
-      return
-    }
-    setSelSection((current) => (
-      current && visibleSections.some((section) => section.id === current) ? current : visibleSections[0].id
-    ))
-  }, [visibleSections])
+      .catch((error) => toast.error(getErrorMessage(error, 'Failed to load teachers')))
+  }, [selInst, selDept])
 
   const slotsByDay = useMemo(() => {
     const grouped = new Map<number, Slot[]>()
@@ -111,16 +87,16 @@ export default function StudentView() {
   }, [view])
 
   const submit = async () => {
-    if (!selInst || !selDept || !semester || !selSection) {
-      toast.error('Select institution, branch, semester, and section')
+    if (!selInst || !selDept || !selFaculty) {
+      toast.error('Select institute, department, and teacher')
       return
     }
     setLoading(true)
     try {
-      const data = await API.getStudentTimetable(selInst, selDept, semester, selSection)
+      const data = await API.getTeacherTimetable(selInst, selDept, selFaculty)
       setView(data)
     } catch (error) {
-      toast.error(getErrorMessage(error, 'Failed to load student timetable'))
+      toast.error(getErrorMessage(error, 'Failed to load teacher timetable'))
       setView(null)
     } finally {
       setLoading(false)
@@ -130,37 +106,30 @@ export default function StudentView() {
   return (
     <div className="space-y-5 animate-fade-in">
       <div>
-        <h1 className="text-2xl font-bold text-[#0F172A]">Student View</h1>
-        <p className="text-[#64748B] text-sm mt-0.5">Choose branch, semester, and section to open the latest completed weekly timetable.</p>
+        <h1 className="text-2xl font-bold text-[#0F172A]">Teacher View</h1>
+        <p className="text-[#64748B] text-sm mt-0.5">Choose institute, department, and teacher name to view the latest completed weekly timetable.</p>
       </div>
 
-      <div className="bg-white border border-[#E4E7EF] rounded-xl shadow-sm p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 items-end">
+      <div className="bg-white border border-[#E4E7EF] rounded-xl shadow-sm p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 items-end">
         <div>
-          <label className="label-xs">Institution</label>
+          <label className="label-xs">Institute</label>
           <select className="select" value={selInst ?? ''} onChange={(event) => setSelInst(Number(event.target.value))}>
-            <option value="" disabled>Select institution...</option>
+            <option value="" disabled>Select institute...</option>
             {institutions.map((institution) => <option key={institution.id} value={institution.id}>{institution.name}</option>)}
           </select>
         </div>
         <div>
-          <label className="label-xs">Branch</label>
+          <label className="label-xs">Department</label>
           <select className="select" value={selDept ?? ''} onChange={(event) => setSelDept(Number(event.target.value))} disabled={!departments.length}>
-            <option value="" disabled>Select branch...</option>
+            <option value="" disabled>Select department...</option>
             {departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
           </select>
         </div>
         <div>
-          <label className="label-xs">Semester</label>
-          <select className="select" value={semester ?? ''} onChange={(event) => setSemester(Number(event.target.value))} disabled={!semesterOptions.length}>
-            <option value="" disabled>Select semester...</option>
-            {semesterOptions.map((value) => <option key={value} value={value}>Semester {value}</option>)}
-          </select>
-        </div>
-        <div>
-          <label className="label-xs">Section</label>
-          <select className="select" value={selSection ?? ''} onChange={(event) => setSelSection(Number(event.target.value))} disabled={!visibleSections.length}>
-            <option value="" disabled>Select section...</option>
-            {visibleSections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}
+          <label className="label-xs">Teacher Name</label>
+          <select className="select" value={selFaculty ?? ''} onChange={(event) => setSelFaculty(Number(event.target.value))} disabled={!facultyOptions.length}>
+            <option value="" disabled>Select teacher...</option>
+            {facultyOptions.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
           </select>
         </div>
         <button className="btn btn-primary h-10" onClick={submit} disabled={loading}>
@@ -173,21 +142,20 @@ export default function StudentView() {
         <div className="bg-white border border-[#E4E7EF] rounded-xl shadow-sm p-4 flex flex-wrap gap-3">
           <span className="badge badge-info">{view.institution_name}</span>
           <span className="badge badge-success">{view.department_name}</span>
-          <span className="badge badge-warn">Semester {view.semester}</span>
-          <span className="badge badge-info">{view.section_name}</span>
+          <span className="badge badge-info">{view.faculty_name}</span>
           <span className="badge badge-success">{view.timetable_name}</span>
         </div>
       )}
 
       {!view ? (
         <div className="bg-white border border-[#E4E7EF] rounded-xl shadow-sm min-h-[300px] flex flex-col items-center justify-center text-[#64748B]">
-          <GraduationCap className="w-10 h-10 mb-3 opacity-40" />
-          <p className="text-sm">Submit your section details to view the latest timetable.</p>
+          <Users className="w-10 h-10 mb-3 opacity-40" />
+          <p className="text-sm">Submit teacher details to view the weekly timetable.</p>
         </div>
       ) : slotsByDay.length === 0 ? (
         <div className="bg-white border border-[#E4E7EF] rounded-xl shadow-sm min-h-[300px] flex flex-col items-center justify-center text-[#64748B]">
           <BookOpen className="w-10 h-10 mb-3 opacity-40" />
-          <p className="text-sm">No classes found for the selected section in the latest completed timetable.</p>
+          <p className="text-sm">No classes found for this teacher in the selected department.</p>
         </div>
       ) : (
         <div className="space-y-4">
@@ -206,16 +174,19 @@ export default function StudentView() {
                         {formatTimeRange(view.start_time, slot.period, view.period_duration_minutes, slot.duration)}
                       </div>
                       <div className="flex items-center gap-2 text-xs text-white/90">
-                        <User className="w-3.5 h-3.5 shrink-0" />
-                        {slot.faculty_name || 'Faculty TBD'}
+                        <Users className="w-3.5 h-3.5 shrink-0" />
+                        {slot.section_name || 'Combined section'}
                       </div>
                       <div className="flex items-center gap-2 text-xs text-white/90">
                         <DoorOpen className="w-3.5 h-3.5 shrink-0" />
                         {slot.room_name || 'Room TBD'}
                       </div>
                     </div>
+                    {slot.is_combined && (
+                      <span className="mt-3 inline-block text-[10px] font-bold bg-white/20 rounded px-2 py-1">COMBINED</span>
+                    )}
                     {slot.slot_type === 'lab' && (
-                      <span className="mt-3 inline-block text-[10px] font-bold bg-white/20 rounded px-2 py-1">LAB · {slot.duration} periods</span>
+                      <span className="mt-3 ml-2 inline-block text-[10px] font-bold bg-white/20 rounded px-2 py-1">LAB</span>
                     )}
                     {slot.slot_type === 'break' && (
                       <span className="mt-3 inline-block text-[10px] font-bold bg-white/20 rounded px-2 py-1">BREAK</span>
