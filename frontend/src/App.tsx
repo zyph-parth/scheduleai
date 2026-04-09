@@ -1,0 +1,109 @@
+import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
+import { Toaster } from 'react-hot-toast'
+import {
+  LayoutDashboard, CalendarDays, Settings, BarChart3,
+  Zap, Users, BookOpen, Building2, ChevronRight, Sparkles
+} from 'lucide-react'
+import clsx from 'clsx'
+import Dashboard   from './pages/Dashboard'
+import Setup       from './pages/Setup'
+import Timetable   from './pages/Timetable'
+import WhatIf      from './pages/WhatIf'
+import Analytics   from './pages/Analytics'
+import StudentView from './pages/StudentView'
+
+const NAV = [
+  { to: '/',          icon: LayoutDashboard, label: 'Dashboard'   },
+  { to: '/setup',     icon: Settings,        label: 'Setup'       },
+  { to: '/timetable', icon: CalendarDays,    label: 'Timetable'   },
+  { to: '/what-if',   icon: Zap,             label: 'What-If'     },
+  { to: '/analytics', icon: BarChart3,       label: 'Analytics'   },
+  { to: '/student',   icon: Users,           label: 'Student View' },
+]
+
+function Sidebar() {
+  const loc = useLocation()
+
+  return (
+    <aside className="fixed left-0 top-0 h-screen w-56 flex flex-col bg-surface-1/80 backdrop-blur border-r border-slate-800 z-40">
+      {/* Logo */}
+      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-slate-800">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center glow-brand">
+          <Sparkles className="w-4 h-4 text-white" />
+        </div>
+        <div>
+          <p className="text-sm font-bold text-slate-100">ScheduleAI</p>
+          <p className="text-[10px] text-slate-500">Timetable Intelligence</p>
+        </div>
+      </div>
+
+      {/* Navigation */}
+      <nav className="flex-1 p-3 space-y-1">
+        {NAV.map(({ to, icon: Icon, label }) => {
+          const active = to === '/' ? loc.pathname === '/' : loc.pathname.startsWith(to)
+          return (
+            <NavLink key={to} to={to}
+              className={clsx('nav-item', active && 'active')}
+            >
+              <Icon className="w-4 h-4 shrink-0" />
+              <span>{label}</span>
+              {active && <ChevronRight className="w-3 h-3 ml-auto opacity-50" />}
+            </NavLink>
+          )
+        })}
+      </nav>
+
+      {/* Footer */}
+      <div className="p-3 border-t border-slate-800">
+        <div className="glass-sm p-3">
+          <p className="text-[10px] text-slate-500 font-medium uppercase tracking-wider mb-1">Problem J</p>
+          <p className="text-xs text-slate-300 font-semibold">Smart Campus 2026</p>
+          <p className="text-[10px] text-slate-500 mt-0.5">Team Mavericks</p>
+        </div>
+      </div>
+    </aside>
+  )
+}
+
+function Layout({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex min-h-screen">
+      <Sidebar />
+      <main className="ml-56 flex-1 p-6 min-h-screen">
+        {children}
+      </main>
+    </div>
+  )
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          style: {
+            background: '#1e293b', color: '#e2e8f0',
+            border: '1px solid #334155', borderRadius: '12px',
+          },
+          success: { iconTheme: { primary: '#10b981', secondary: '#1e293b' } },
+          error:   { iconTheme: { primary: '#ef4444', secondary: '#1e293b' } },
+        }}
+      />
+      <Routes>
+        <Route path="/student/:ttId?" element={<StudentView />} />
+        <Route path="*" element={
+          <Layout>
+            <Routes>
+              <Route path="/"          element={<Dashboard />}   />
+              <Route path="/setup"     element={<Setup />}       />
+              <Route path="/timetable" element={<Timetable />}   />
+              <Route path="/what-if"   element={<WhatIf />}      />
+              <Route path="/analytics" element={<Analytics />}   />
+            </Routes>
+          </Layout>
+        } />
+      </Routes>
+    </BrowserRouter>
+  )
+}
