@@ -2,7 +2,7 @@ import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router
 import { Toaster } from 'react-hot-toast'
 import {
   LayoutDashboard, CalendarDays, Settings, BarChart3,
-  Zap, Users, BookOpen, Building2, ChevronRight, Sparkles
+  Zap, Users, ChevronRight, Sparkles
 } from 'lucide-react'
 import clsx from 'clsx'
 import Dashboard   from './pages/Dashboard'
@@ -25,10 +25,10 @@ function Sidebar() {
   const loc = useLocation()
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-56 flex flex-col bg-surface-1/80 backdrop-blur border-r border-slate-800 z-40">
+    <aside className="app-sidebar">
       {/* Logo */}
-      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-slate-800">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center glow-brand">
+      <div className="app-sidebar-brand">
+        <div className="app-sidebar-logo">
           <Sparkles className="w-4 h-4 text-white" />
         </div>
         <div>
@@ -38,7 +38,7 @@ function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 p-3 space-y-1">
+      <nav className="app-sidebar-nav">
         {NAV.map(({ to, icon: Icon, label }) => {
           const active = to === '/' ? loc.pathname === '/' : loc.pathname.startsWith(to)
           return (
@@ -54,8 +54,8 @@ function Sidebar() {
       </nav>
 
       {/* Footer */}
-      <div className="p-3 border-t border-slate-800">
-        <div className="glass-sm p-3">
+      <div className="app-sidebar-footer">
+        <div className="app-sidebar-footer-card">
           <p className="text-[10px] text-slate-500 font-medium uppercase tracking-wider mb-1">Problem J</p>
           <p className="text-xs text-slate-300 font-semibold">Smart Campus 2026</p>
           <p className="text-[10px] text-slate-500 mt-0.5">Team Mavericks</p>
@@ -67,9 +67,9 @@ function Sidebar() {
 
 function Layout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-screen">
+    <div className="app-shell">
       <Sidebar />
-      <main className="ml-56 flex-1 p-6 min-h-screen">
+      <main className="app-main">
         {children}
       </main>
     </div>

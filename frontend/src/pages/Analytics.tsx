@@ -2,42 +2,70 @@ import { useEffect, useState } from 'react'
 import { API } from '../api/client'
 import toast from 'react-hot-toast'
 import {
-  BarChart3, Users, DoorOpen, GraduationCap, Star,
-  TrendingUp, Sun, AlertCircle
-} from 'lucide-react'
-import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  RadarChart, Radar, PolarGrid, PolarAngleAxis, Cell, PieChart, Pie, Legend
+  PieChart, Pie, Cell,
 } from 'recharts'
 
-const CHART_COLORS = ['#6366f1','#10b981','#f59e0b','#ef4444','#06b6d4','#8b5cf6','#ec4899','#14b8a6']
+const CHART_COLORS = ['#0053db','#16a34a','#d97706','#dc2626','#0891b2','#7c3aed','#db2777','#0d9488']
 
-function StatCard({ label, value, sub, icon: Icon, colour = 'brand' }: any) {
+const fontImport = `
+  @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Inter:wght@400;500;600&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0&display=swap');
+`
+
+function StatCard({ label, value, sub, icon }: { label: string; value: any; sub?: string; icon: string }) {
   return (
-    <div className="stat-card">
-      <div className="flex items-center justify-between mb-2">
-        <span className="stat-label">{label}</span>
-        <div className={`w-7 h-7 rounded-lg bg-${colour}-500/20 flex items-center justify-center`}>
-          <Icon className={`w-3.5 h-3.5 text-${colour}-400`} />
-        </div>
+    <div style={{
+      background: '#fff', border: '1px solid rgba(169,180,185,.3)',
+      padding: 24, display: 'flex', flexDirection: 'column',
+      justifyContent: 'space-between', minHeight: 120,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <p style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.1em', margin: 0 }}>
+          {label}
+        </p>
+        <span className="ms" style={{ fontSize: 18, color: '#0053db', opacity: .7 }}>{icon}</span>
       </div>
-      <span className="stat-value">{value}</span>
-      {sub && <span className="text-xs text-slate-500 mt-0.5">{sub}</span>}
+      <div>
+        <span style={{ fontSize: 30, fontWeight: 800, fontFamily: 'Manrope, sans-serif', color: '#0f172a' }}>{value}</span>
+        {sub && <p style={{ fontSize: 10, color: '#94a3b8', margin: '2px 0 0', fontWeight: 600 }}>{sub}</p>}
+      </div>
     </div>
   )
 }
 
 function WellbeingBar({ name, score }: { name: string; score: number }) {
-  const colour = score >= 70 ? 'bg-emerald-400' : score >= 40 ? 'bg-amber-400' : 'bg-red-400'
+  const color = score >= 70 ? '#16a34a' : score >= 40 ? '#d97706' : '#dc2626'
   return (
-    <div className="flex items-center gap-3">
-      <span className="text-xs text-slate-400 w-32 truncate shrink-0">{name}</span>
-      <div className="flex-1 progress-bar">
-        <div className={`h-full rounded-full transition-all duration-700 ${colour}`} style={{ width: `${score}%` }} />
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <span style={{ fontSize: 12, color: '#64748b', width: 140, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {name}
+      </span>
+      <div style={{ flex: 1, height: 6, background: '#f1f5f9', borderRadius: 0 }}>
+        <div style={{ height: '100%', width: `${score}%`, background: color, transition: 'width .7s ease' }} />
       </div>
-      <span className="text-xs font-semibold text-slate-300 w-8 text-right">{score}</span>
+      <span style={{ fontSize: 12, fontWeight: 700, color: '#475569', width: 32, textAlign: 'right' }}>{score}</span>
     </div>
   )
+}
+
+const SectionCard = ({ children, title, icon }: { children: React.ReactNode; title: string; icon: string }) => (
+  <div style={{ background: '#fff', border: '1px solid rgba(169,180,185,.3)' }}>
+    <div style={{ padding: '14px 24px', borderBottom: '1px solid #f1f5f9', background: 'rgba(248,250,252,.5)', display: 'flex', alignItems: 'center', gap: 8 }}>
+      <span className="ms" style={{ fontSize: 18, color: '#0053db' }}>{icon}</span>
+      <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, fontFamily: 'Manrope, sans-serif' }}>{title}</h3>
+    </div>
+    <div style={{ padding: 24 }}>{children}</div>
+  </div>
+)
+
+const tooltipStyle = {
+  contentStyle: {
+    background: '#fff', border: '1px solid rgba(169,180,185,.3)',
+    borderRadius: 0, fontSize: 12, fontFamily: 'Inter, sans-serif',
+    color: '#0f172a', boxShadow: '0 2px 8px rgba(0,0,0,.08)',
+  },
+  labelStyle: { fontWeight: 700, color: '#0f172a' },
 }
 
 export default function Analytics() {
@@ -69,7 +97,7 @@ export default function Analytics() {
   }, [selTtId])
 
   const facultyChartData = (data?.faculty_load || []).map((f: any) => ({
-    name: f.faculty_name.split(' ').pop(),   // Last name only for chart
+    name: f.faculty_name.split(' ').pop(),
     hours: f.hours_per_week,
     full: f.faculty_name,
   }))
@@ -87,170 +115,201 @@ export default function Analytics() {
   ] : []
 
   return (
-    <div className="space-y-5 animate-fade-in">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-50 flex items-center gap-2">
-            <BarChart3 className="w-6 h-6 text-brand-400" /> Analytics
-          </h1>
-          <p className="text-slate-400 text-sm mt-0.5">Schedule quality insights and resource utilization</p>
-        </div>
-        <div className="flex gap-3">
+    <>
+      <style>{fontImport}{`
+        .ana-root { font-family: 'Inter', sans-serif; color: #2a3439; }
+        .ana-root h1, .ana-root h2, .ana-root h3, .ana-root h4 { font-family: 'Manrope', sans-serif; }
+        .ms { font-family: 'Material Symbols Outlined'; font-weight: normal; font-style: normal;
+              font-size: 20px; line-height: 1; letter-spacing: normal; text-transform: none;
+              display: inline-block; white-space: nowrap; -webkit-font-feature-settings: 'liga';
+              font-feature-settings: 'liga'; -webkit-font-smoothing: antialiased; }
+        .input-field { border: 1px solid rgba(169,180,185,.5); padding: 10px 16px; font-size: 13px;
+                       font-family: 'Inter', sans-serif; outline: none; background: #fff; }
+        .input-field:focus { border-color: #0053db; }
+        .label-xs { font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase;
+                    letter-spacing: .1em; margin-bottom: 6px; display: block; }
+        .gap-card { background: #f8fafc; border: 1px solid rgba(169,180,185,.2); padding: 16px; text-align: center; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spinner { animation: spin 1s linear infinite; display: inline-block; }
+      `}</style>
+
+      <div className="ana-root" style={{ background: '#f7f9fb', minHeight: '100vh', padding: 32 }}>
+
+        {/* ── Page header ── */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 32, flexWrap: 'wrap', gap: 16 }}>
           <div>
-            <label className="label">Institution</label>
-            <select className="select w-44" value={selInst ?? ''} onChange={e => setSelInst(Number(e.target.value))}>
-              <option value="" disabled>Select…</option>
-              {institutions.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="label">Timetable</label>
-            <select className="select w-52" value={selTtId ?? ''} onChange={e => setSelTtId(Number(e.target.value))}>
-              <option value="" disabled>Select…</option>
-              {timetables.filter(t => t.status === 'done').map((t: any) => (
-                <option key={t.id} value={t.id}>{t.name}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {loading && (
-        <div className="flex items-center justify-center py-20">
-          <span className="spinner w-8 h-8" />
-        </div>
-      )}
-
-      {!loading && data && (
-        <>
-          {/* Summary stats */}
-          <div className="grid grid-cols-4 gap-4">
-            <StatCard label="Total Slots" value={data.total_slots} icon={GraduationCap} colour="brand" />
-            <StatCard label="Faculty Members" value={data.faculty_load.length} icon={Users} colour="purple" />
-            <StatCard label="Rooms Used" value={data.room_utilization.filter((r:any)=>r.used_periods>0).length} icon={DoorOpen} colour="blue" />
-            <StatCard
-              label="Core in Morning"
-              value={`${data.core_subject_distribution.morning_pct}%`}
-              sub={`${data.core_subject_distribution.core_in_morning} of ${data.core_subject_distribution.core_total}`}
-              icon={Sun}
-              colour="amber"
-            />
+            <h1 style={{ fontSize: 28, fontWeight: 800, margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span className="ms" style={{ fontSize: 28, color: '#0053db' }}>bar_chart</span>
+              Analytics
+            </h1>
+            <p style={{ color: '#64748b', fontWeight: 500, marginTop: 4, fontSize: 14 }}>
+              Schedule quality insights and resource utilization
+            </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-5">
-            {/* Faculty load chart */}
-            <div className="glass p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <Users className="w-4 h-4 text-brand-400" />
-                <h3 className="text-sm font-semibold text-slate-200">Faculty Hours/Week</h3>
-              </div>
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={facultyChartData} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-                  <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                  <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                  <Tooltip
-                    contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', fontSize: 12 }}
-                    formatter={(v: any, _: any, props: any) => [v, props.payload.full]}
-                  />
-                  <Bar dataKey="hours" radius={[4,4,0,0]}>
-                    {facultyChartData.map((_: any, i: number) => (
-                      <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+          {/* Selectors */}
+          <div style={{ display: 'flex', gap: 16 }}>
+            <div>
+              <span className="label-xs">Institution</span>
+              <select
+                className="input-field"
+                style={{ width: 180 }}
+                value={selInst ?? ''}
+                onChange={e => setSelInst(Number(e.target.value))}
+              >
+                <option value="" disabled>Select…</option>
+                {institutions.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+              </select>
             </div>
-
-            {/* Room utilization */}
-            <div className="glass p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <DoorOpen className="w-4 h-4 text-blue-400" />
-                <h3 className="text-sm font-semibold text-slate-200">Room Utilization %</h3>
-              </div>
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={roomChartData} layout="vertical" margin={{ top: 4, right: 16, left: 16, bottom: 0 }}>
-                  <XAxis type="number" domain={[0,100]} tick={{ fontSize: 10, fill: '#94a3b8' }} unit="%" />
-                  <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: '#94a3b8' }} width={60} />
-                  <Tooltip
-                    contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', fontSize: 12 }}
-                    formatter={(v: any) => [`${v}%`, 'Utilization']}
-                  />
-                  <Bar dataKey="pct" radius={[0,4,4,0]}>
-                    {roomChartData.map((_: any, i: number) => (
-                      <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-5">
-            {/* Faculty wellbeing */}
-            <div className="glass p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <Star className="w-4 h-4 text-amber-400" />
-                <h3 className="text-sm font-semibold text-slate-200">Faculty Wellbeing Score</h3>
-                <span className="text-xs text-slate-500 ml-1">(100 = perfectly balanced)</span>
-              </div>
-              <div className="space-y-3">
-                {(data.wellbeing_scores || []).map((f: any) => (
-                  <WellbeingBar key={f.faculty_id} name={f.faculty_name} score={f.score} />
+            <div>
+              <span className="label-xs">Timetable</span>
+              <select
+                className="input-field"
+                style={{ width: 220 }}
+                value={selTtId ?? ''}
+                onChange={e => setSelTtId(Number(e.target.value))}
+              >
+                <option value="" disabled>Select…</option>
+                {timetables.filter((t: any) => t.status === 'done').map((t: any) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
                 ))}
-              </div>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Loading ── */}
+        {loading && (
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '80px 0' }}>
+            <span className="ms spinner" style={{ fontSize: 36, color: '#0053db' }}>refresh</span>
+          </div>
+        )}
+
+        {/* ── Data ── */}
+        {!loading && data && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
+
+            {/* Stats row */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 24 }}>
+              <StatCard label="Total Slots"      value={data.total_slots}                              icon="calendar_month" />
+              <StatCard label="Faculty Members"  value={data.faculty_load.length}                      icon="group" />
+              <StatCard label="Rooms Used"       value={data.room_utilization.filter((r: any) => r.used_periods > 0).length} icon="meeting_room" />
+              <StatCard
+                label="Core in Morning"
+                value={`${data.core_subject_distribution.morning_pct}%`}
+                sub={`${data.core_subject_distribution.core_in_morning} of ${data.core_subject_distribution.core_total} core subjects`}
+                icon="wb_sunny"
+              />
             </div>
 
-            {/* Core distribution pie */}
-            <div className="glass p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <Sun className="w-4 h-4 text-amber-400" />
-                <h3 className="text-sm font-semibold text-slate-200">Core Subjects in Morning Slots</h3>
-              </div>
-              {corePie.some(p => p.value > 0) ? (
-                <ResponsiveContainer width="100%" height={200}>
-                  <PieChart>
-                    <Pie data={corePie} cx="50%" cy="50%" outerRadius={80} dataKey="value" label={({ name, percent }: any) => `${name} ${Math.round(percent * 100)}%`}>
-                      <Cell fill="#f59e0b" />
-                      <Cell fill="#334155" />
-                    </Pie>
-                    <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', fontSize: 12 }} />
-                  </PieChart>
+            {/* Charts row 1 */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 28 }}>
+
+              <SectionCard title="Faculty Hours / Week" icon="group">
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={facultyChartData} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: '#64748b', fontFamily: 'Inter' }} axisLine={false} tickLine={false} />
+                    <YAxis tick={{ fontSize: 11, fill: '#64748b', fontFamily: 'Inter' }} axisLine={false} tickLine={false} />
+                    <Tooltip
+                      {...tooltipStyle}
+                      formatter={(v: any, _: any, props: any) => [v + ' hrs', props.payload.full]}
+                    />
+                    <Bar dataKey="hours" radius={[2, 2, 0, 0]}>
+                      {facultyChartData.map((_: any, i: number) => (
+                        <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                      ))}
+                    </Bar>
+                  </BarChart>
                 </ResponsiveContainer>
-              ) : (
-                <div className="flex items-center justify-center h-40 text-slate-500 text-sm">No core courses found</div>
-              )}
-            </div>
-          </div>
+              </SectionCard>
 
-          {/* Section gaps */}
-          {data.section_gaps.length > 0 && (
-            <div className="glass p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <AlertCircle className="w-4 h-4 text-slate-400" />
-                <h3 className="text-sm font-semibold text-slate-200">Student Free-Period Gaps per Section</h3>
-              </div>
-              <div className="grid grid-cols-4 gap-3">
-                {data.section_gaps.map((s: any) => (
-                  <div key={s.section_id} className="glass-sm p-3 text-center">
-                    <p className="text-xs font-semibold text-slate-300 mb-1">{s.section_name}</p>
-                    <p className={`text-2xl font-bold ${s.total_gaps === 0 ? 'text-emerald-400' : s.total_gaps < 5 ? 'text-amber-400' : 'text-red-400'}`}>
-                      {s.total_gaps}
-                    </p>
-                    <p className="text-[10px] text-slate-500">gaps/week</p>
+              <SectionCard title="Room Utilization %" icon="meeting_room">
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={roomChartData} layout="vertical" margin={{ top: 4, right: 16, left: 16, bottom: 0 }}>
+                    <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 11, fill: '#64748b', fontFamily: 'Inter' }} axisLine={false} tickLine={false} unit="%" />
+                    <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: '#64748b', fontFamily: 'Inter' }} width={64} axisLine={false} tickLine={false} />
+                    <Tooltip
+                      {...tooltipStyle}
+                      formatter={(v: any) => [`${v}%`, 'Utilization']}
+                    />
+                    <Bar dataKey="pct" radius={[0, 2, 2, 0]}>
+                      {roomChartData.map((_: any, i: number) => (
+                        <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </SectionCard>
+            </div>
+
+            {/* Charts row 2 */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 28 }}>
+
+              <SectionCard title="Faculty Wellbeing Score" icon="star">
+                <p style={{ fontSize: 11, color: '#94a3b8', marginBottom: 16, marginTop: -8 }}>100 = perfectly balanced schedule</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  {(data.wellbeing_scores || []).map((f: any) => (
+                    <WellbeingBar key={f.faculty_id} name={f.faculty_name} score={f.score} />
+                  ))}
+                </div>
+              </SectionCard>
+
+              <SectionCard title="Core Subjects in Morning Slots" icon="wb_sunny">
+                {corePie.some((p: any) => p.value > 0) ? (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <PieChart>
+                      <Pie
+                        data={corePie}
+                        cx="50%" cy="50%"
+                        outerRadius={90}
+                        dataKey="value"
+                        label={({ name, percent }: any) => `${name} ${Math.round(percent * 100)}%`}
+                        labelLine={{ stroke: '#cbd5e1' }}
+                      >
+                        <Cell fill="#0053db" />
+                        <Cell fill="#e2e8f0" />
+                      </Pie>
+                      <Tooltip {...tooltipStyle} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 160, color: '#94a3b8', fontSize: 13 }}>
+                    No core courses found
                   </div>
-                ))}
-              </div>
+                )}
+              </SectionCard>
             </div>
-          )}
-        </>
-      )}
 
-      {!loading && !data && (
-        <div className="flex flex-col items-center justify-center py-24 text-slate-500">
-          <BarChart3 className="w-10 h-10 mb-3 opacity-30" />
-          <p className="text-sm">Select a completed timetable to view analytics</p>
-        </div>
-      )}
-    </div>
+            {/* Section gaps */}
+            {data.section_gaps?.length > 0 && (
+              <SectionCard title="Student Free-Period Gaps per Section" icon="warning">
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16 }}>
+                  {data.section_gaps.map((s: any) => {
+                    const color = s.total_gaps === 0 ? '#16a34a' : s.total_gaps < 5 ? '#d97706' : '#dc2626'
+                    return (
+                      <div key={s.section_id} className="gap-card">
+                        <p style={{ fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 6 }}>{s.section_name}</p>
+                        <p style={{ fontSize: 28, fontWeight: 800, color, fontFamily: 'Manrope, sans-serif', margin: 0 }}>{s.total_gaps}</p>
+                        <p style={{ fontSize: 10, color: '#94a3b8', marginTop: 2, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.07em' }}>
+                          gaps / week
+                        </p>
+                      </div>
+                    )
+                  })}
+                </div>
+              </SectionCard>
+            )}
+          </div>
+        )}
+
+        {/* ── Empty state ── */}
+        {!loading && !data && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '96px 0', color: '#94a3b8' }}>
+            <span className="ms" style={{ fontSize: 48, opacity: .25, display: 'block', marginBottom: 12 }}>bar_chart</span>
+            <p style={{ fontSize: 14, margin: 0 }}>Select a completed timetable to view analytics</p>
+          </div>
+        )}
+      </div>
+    </>
   )
 }
