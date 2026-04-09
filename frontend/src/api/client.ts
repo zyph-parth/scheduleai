@@ -113,6 +113,26 @@ export interface Timetable extends TimetableMeta {
   violations: { type: string; description: string; severity: string }[]
 }
 
+export interface ViewerTimetable {
+  timetable_id: number
+  timetable_name: string
+  institution_id: number
+  institution_name: string
+  start_time: string
+  period_duration_minutes: number
+  working_days: number[]
+  periods_per_day: Record<string, number[]>
+  break_slots: Record<string, number[]>
+  slots: Slot[]
+  department_id?: number
+  department_name?: string
+  semester?: number
+  section_id?: number
+  section_name?: string
+  faculty_id?: number
+  faculty_name?: string
+}
+
 export interface InstitutionPayload {
   name: string
   working_days: number[]
@@ -273,6 +293,30 @@ export const API = {
     api.get<Timetable>(`/timetables/${id}`).then((r) => r.data),
   deleteTimetable: (id: number) =>
     api.delete(`/timetables/${id}`),
+  getStudentTimetable: (institutionId: number, departmentId: number, semester: number, sectionId: number) =>
+    api.get<ViewerTimetable>('/views/student', {
+      params: {
+        institution_id: institutionId,
+        department_id: departmentId,
+        semester,
+        section_id: sectionId,
+      },
+    }).then((r) => r.data),
+  getTeacherFacultyOptions: (institutionId: number, departmentId: number) =>
+    api.get<Array<{ id: number; name: string }>>('/views/teacher/faculty', {
+      params: {
+        institution_id: institutionId,
+        department_id: departmentId,
+      },
+    }).then((r) => r.data),
+  getTeacherTimetable: (institutionId: number, departmentId: number, facultyId: number) =>
+    api.get<ViewerTimetable>('/views/teacher', {
+      params: {
+        institution_id: institutionId,
+        department_id: departmentId,
+        faculty_id: facultyId,
+      },
+    }).then((r) => r.data),
   whatIf: (data: unknown) =>
     api.post('/timetables/what-if', data).then((r) => r.data),
   findSubstitutes: (timetableId: number, slotId: number) =>

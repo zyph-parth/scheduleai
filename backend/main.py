@@ -336,6 +336,38 @@ def _build_nlp_context(institution_id: int, db: Session) -> Dict[str, Any]:
     }
 
 
+def _get_latest_done_timetable(institution_id: int, db: Session) -> Timetable:
+    timetable = (
+        db.query(Timetable)
+        .filter(
+            Timetable.institution_id == institution_id,
+            Timetable.status == "done",
+        )
+        .order_by(Timetable.created_at.desc(), Timetable.id.desc())
+        .first()
+    )
+    if not timetable:
+        raise HTTPException(404, "No completed timetable found for this institution")
+    return timetable
+
+
+def _serialize_view_payload(tt: Timetable, slots: List[Slot], db: Session, **extra: Any) -> Dict[str, Any]:
+    inst = tt.institution
+    return {
+        "timetable_id": tt.id,
+        "timetable_name": tt.name,
+        "institution_id": inst.id,
+        "institution_name": inst.name,
+        "start_time": inst.start_time,
+        "period_duration_minutes": inst.period_duration_minutes,
+        "working_days": inst.working_days or [],
+        "periods_per_day": inst.periods_per_day or {},
+        "break_slots": inst.break_slots or {},
+        "slots": _enrich_slots(slots, db),
+        **extra,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Institutions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -781,6 +813,8 @@ def create_section_course(body: SectionCourseCreate, db: Session = Depends(get_d
         raise _bad_request("Course and section must belong to the same department")
     if faculty.institution_id != section.department.institution_id:
         raise _bad_request("Faculty must belong to the same institution as the section")
+    if not _faculty_subject_match(course, faculty):
+        raise _bad_request("Selected faculty is not eligible to teach this course")
     duplicate = db.query(SectionCourse).filter(
         SectionCourse.section_id == body.section_id,
         SectionCourse.course_id == body.course_id,
@@ -833,6 +867,8 @@ def create_combined_group(body: CombinedGroupCreate, db: Session = Depends(get_d
         raise _bad_request("One or more selected sections do not exist")
     if faculty.institution_id != inst.id:
         raise _bad_request("Faculty must belong to the same institution")
+    if not _faculty_subject_match(course, faculty):
+        raise _bad_request("Selected faculty is not eligible to teach this course")
     if any(section.department.institution_id != inst.id for section in sections):
         raise _bad_request("All sections must belong to the selected institution")
     department_ids = {section.department_id for section in sections}
@@ -1007,7 +1043,13 @@ def _enrich_slots(slots, db: Session) -> List[dict]:
             d["course_name"]  = sl.course.name  if sl.course  else ""
             d["faculty_name"] = sl.faculty.name if sl.faculty else ""
             d["room_name"]    = sl.room.name    if sl.room     else "TBD"
-        d["section_name"] = sl.section.name if sl.section else ""
+        if sl.is_combined and sl.section_ids:
+            names = [
+                name for (name,) in db.query(Section.name).filter(Section.id.in_(sl.section_ids)).all()
+            ]
+            d["section_name"] = " + ".join(names)
+        else:
+            d["section_name"] = sl.section.name if sl.section else ""
         result.append(d)
     return result
 
@@ -1029,13 +1071,20 @@ def _faculty_subject_match(course: Optional[Course], faculty: Faculty) -> bool:
     if not course:
         return False
 
-    course_name = (course.name or "").strip().lower()
-    if not course_name:
+    candidates = {
+        _normalize_name(course.name).lower(),
+        _normalize_name(course.code).lower(),
+    }
+    candidates = {value for value in candidates if value}
+    if not candidates:
         return False
 
     for subject in faculty.subjects or []:
-        normalized = (subject or "").strip().lower()
-        if normalized and (course_name in normalized or normalized in course_name):
+        normalized = _normalize_name(subject).lower()
+        if normalized and any(
+            normalized == candidate or normalized in candidate or candidate in normalized
+            for candidate in candidates
+        ):
             return True
     return False
 
@@ -1210,6 +1259,123 @@ def get_timetable(tt_id: int, db: Session = Depends(get_db)):
             for v in tt.violations
         ],
     }
+
+
+@app.get("/views/student")
+def get_student_view(
+    institution_id: int = Query(...),
+    department_id: int = Query(...),
+    semester: int = Query(...),
+    section_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    inst = _get_institution(db, institution_id)
+    dept = _get_department(db, department_id)
+    section = _get_section(db, section_id)
+
+    if dept.institution_id != inst.id:
+        raise _bad_request("Department must belong to the selected institution")
+    if section.department_id != dept.id:
+        raise _bad_request("Section must belong to the selected department")
+    if section.semester != semester:
+        raise _bad_request("Section does not belong to the selected semester")
+
+    tt = _get_latest_done_timetable(inst.id, db)
+    slots = [
+        slot
+        for slot in tt.slots
+        if slot.section_id == section.id
+    ]
+
+    return _serialize_view_payload(
+        tt,
+        slots,
+        db,
+        department_id=dept.id,
+        department_name=dept.name,
+        semester=section.semester,
+        section_id=section.id,
+        section_name=section.name,
+    )
+
+
+@app.get("/views/teacher/faculty")
+def list_teacher_view_faculty(
+    institution_id: int = Query(...),
+    department_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    inst = _get_institution(db, institution_id)
+    dept = _get_department(db, department_id)
+    if dept.institution_id != inst.id:
+        raise _bad_request("Department must belong to the selected institution")
+
+    faculty_ids = {
+        faculty_id
+        for (faculty_id,) in db.query(SectionCourse.faculty_id)
+        .join(Section, Section.id == SectionCourse.section_id)
+        .filter(Section.department_id == dept.id)
+        .distinct()
+        .all()
+    }
+    faculty_ids.update(
+        faculty_id
+        for (faculty_id,) in db.query(CombinedGroup.faculty_id)
+        .join(Course, Course.id == CombinedGroup.course_id)
+        .filter(
+            CombinedGroup.institution_id == inst.id,
+            Course.department_id == dept.id,
+        )
+        .distinct()
+        .all()
+    )
+
+    faculty = db.query(Faculty).filter(Faculty.id.in_(faculty_ids)).order_by(Faculty.name.asc()).all() if faculty_ids else []
+    return [
+        {"id": member.id, "name": member.name}
+        for member in faculty
+    ]
+
+
+@app.get("/views/teacher")
+def get_teacher_view(
+    institution_id: int = Query(...),
+    department_id: int = Query(...),
+    faculty_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    inst = _get_institution(db, institution_id)
+    dept = _get_department(db, department_id)
+    faculty = _get_faculty(db, faculty_id)
+
+    if dept.institution_id != inst.id:
+        raise _bad_request("Department must belong to the selected institution")
+    if faculty.institution_id != inst.id:
+        raise _bad_request("Faculty must belong to the selected institution")
+
+    valid_faculty_ids = {
+        item["id"]
+        for item in list_teacher_view_faculty(institution_id=inst.id, department_id=dept.id, db=db)
+    }
+    if faculty.id not in valid_faculty_ids:
+        raise _bad_request("Selected faculty does not teach in the selected department")
+
+    tt = _get_latest_done_timetable(inst.id, db)
+    slots = [
+        slot
+        for slot in tt.slots
+        if slot.faculty_id == faculty.id and slot.course and slot.course.department_id == dept.id
+    ]
+
+    return _serialize_view_payload(
+        tt,
+        slots,
+        db,
+        department_id=dept.id,
+        department_name=dept.name,
+        faculty_id=faculty.id,
+        faculty_name=faculty.name,
+    )
 
 
 @app.delete("/timetables/{tt_id}")
