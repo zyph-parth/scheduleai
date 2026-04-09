@@ -40,6 +40,13 @@ export interface TimetableMeta {
   solve_time: number; created_at: string; slot_count: number
 }
 
+export interface TimetableDiagnostic {
+  type: string
+  description: string
+  severity: string
+  meta?: Record<string, any>
+}
+
 export interface Timetable extends TimetableMeta {
   slots: Slot[]
   violations: { type: string; description: string; severity: string }[]
@@ -48,6 +55,19 @@ export interface Timetable extends TimetableMeta {
 export interface GenerateRequest {
   institution_id: number; name: string; semester?: string
   locked_slots?: any[]; max_solve_seconds?: number
+}
+
+export interface GenerateTimetableResponse {
+  timetable_id: number
+  status: string
+  solve_time: number
+  num_slots: number
+  conflicts: TimetableDiagnostic[]
+  objective: number
+  warnings: string[]
+  diagnostics: TimetableDiagnostic[]
+  unassigned_slots: any[]
+  recovery_suggestions: string[]
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
@@ -97,7 +117,7 @@ export const API = {
   deleteCombinedGroup:  (id:number)       => api.delete(`/combined-groups/${id}`),
 
   // Timetables
-  generateTimetable:    (d:GenerateRequest) => api.post('/timetables/generate', d).then(r=>r.data),
+  generateTimetable:    (d:GenerateRequest) => api.post<GenerateTimetableResponse>('/timetables/generate', d).then(r=>r.data),
   listTimetables:       (inst:number)       => api.get<TimetableMeta[]>('/timetables', {params:{institution_id:inst}}).then(r=>r.data),
   getTimetable:         (id:number)         => api.get<Timetable>(`/timetables/${id}`).then(r=>r.data),
   deleteTimetable:      (id:number)         => api.delete(`/timetables/${id}`),
@@ -112,4 +132,6 @@ export const API = {
   // NLP
   parseConstraint:      (inst:number, text:string) =>
     api.post('/nlp/parse-constraint', {institution_id:inst, text}).then(r=>r.data),
+  executeConstraint:    (inst:number, text:string, timetableId?: number | null) =>
+    api.post('/nlp/execute', {institution_id:inst, text, timetable_id: timetableId ?? null}).then(r=>r.data),
 }

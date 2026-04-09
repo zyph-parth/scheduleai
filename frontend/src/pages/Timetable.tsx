@@ -106,8 +106,8 @@ export default function TimetablePage() {
     const slot = info.event.extendedProps.slot as Slot
     setSelSlot(slot)
     if (selTtId) {
-      const candidates = await API.findSubstitutes(selTtId, slot.id).catch(() => [])
-      setSubs(candidates)
+      const response = await API.findSubstitutes(selTtId, slot.id).catch(() => ({ candidates: [] }))
+      setSubs(response?.candidates || [])
     }
   }
 

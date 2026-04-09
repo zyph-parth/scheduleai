@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react'
-import { API, type Institution, type Department, type Room, type Faculty, type Course, type Section } from '../api/client'
+import { useNavigate } from 'react-router-dom'
+import { API, type Institution, type Department, type Room, type Faculty, type Course, type Section, type GenerateTimetableResponse } from '../api/client'
 import toast from 'react-hot-toast'
 import {
-  Building2, Users, BookOpen, DoorOpen, GraduationCap,
-  Plus, Trash2, Save, ChevronDown, ChevronUp, Cpu, Brain
+  Users, BookOpen, DoorOpen, GraduationCap,
+  Plus, Trash2, ChevronDown, ChevronUp, Cpu, Brain,
+  Sparkles, AlertTriangle, CheckCircle2, ArrowRight, FlaskConical
 } from 'lucide-react'
 import clsx from 'clsx'
-
-const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat']
 
 // ─── Collapsible Section ──────────────────────────────────────────────────────
 function Panel({ title, icon: Icon, children, colour = 'brand' }: any) {
@@ -36,6 +36,7 @@ function NLPBox({ instId }: { instId: number }) {
   const [text, setText] = useState('')
   const [result, setResult] = useState<any>(null)
   const [loading, setLoading] = useState(false)
+  const [executing, setExecuting] = useState(false)
 
   const parse = async () => {
     if (!text.trim()) return
@@ -48,6 +49,24 @@ function NLPBox({ instId }: { instId: number }) {
     finally { setLoading(false) }
   }
 
+  const apply = async () => {
+    if (!text.trim()) return
+    setExecuting(true)
+    try {
+      const r = await API.executeConstraint(instId, text)
+      setResult(r)
+      if (r.executed) {
+        toast.success('Command executed')
+      } else {
+        toast.error('Parsed, but no executable action was found')
+      }
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || 'Command execution failed')
+    } finally {
+      setExecuting(false)
+    }
+  }
+
   return (
     <div className="glass p-5 border border-brand-600/20">
       <div className="flex items-center gap-2 mb-3">
@@ -56,12 +75,12 @@ function NLPBox({ instId }: { instId: number }) {
         <span className="badge-purple ml-auto">NLP</span>
       </div>
       <p className="text-slate-500 text-xs mb-3">
-        Type a constraint in plain English — AI will parse it into a structured rule.
+        Type a natural-language command. The parser can now execute absences, reschedules, cancellations, and some faculty/course updates.
       </p>
       <div className="flex gap-2">
         <input
           className="input flex-1"
-          placeholder='e.g. "Dr. Sharma cannot teach before 10am on Mondays"'
+          placeholder='e.g. "Dr. Sharma is absent on Monday"'
           value={text}
           onChange={e => setText(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && parse()}
@@ -69,6 +88,10 @@ function NLPBox({ instId }: { instId: number }) {
         <button className="btn-primary shrink-0" onClick={parse} disabled={loading}>
           {loading ? <span className="spinner w-4 h-4" /> : <Cpu className="w-4 h-4" />}
           Parse
+        </button>
+        <button className="btn-secondary shrink-0" onClick={apply} disabled={executing}>
+          {executing ? <span className="spinner w-4 h-4" /> : <Brain className="w-4 h-4" />}
+          Apply
         </button>
       </div>
       {result && (
@@ -80,6 +103,16 @@ function NLPBox({ instId }: { instId: number }) {
           <p className="text-xs text-slate-500 mt-1">
             Confidence: {Math.round((result.confidence || 0.5) * 100)}%
           </p>
+          {'executed' in result && (
+            <p className="text-xs text-brand-300 mt-2">
+              Execution: {result.executed ? 'applied' : 'not applied'}
+            </p>
+          )}
+          {result.result?.mode === 'what_if' && (
+            <p className="text-xs text-slate-400 mt-1">
+              Latest done timetable was regenerated. New timetable #{result.result.timetable_id} with {result.result.modified_count} modified slot(s).
+            </p>
+          )}
         </div>
       )}
     </div>
@@ -88,6 +121,7 @@ function NLPBox({ instId }: { instId: number }) {
 
 // ─── Main Setup Page ──────────────────────────────────────────────────────────
 export default function Setup() {
+  const navigate = useNavigate()
   const [institutions, setInstitutions] = useState<Institution[]>([])
   const [selInst, setSelInst]           = useState<number | null>(null)
   const [departments, setDepartments]   = useState<Department[]>([])
@@ -96,25 +130,90 @@ export default function Setup() {
   const [faculty, setFaculty]           = useState<Faculty[]>([])
   const [courses, setCourses]           = useState<Course[]>([])
   const [sections, setSections]         = useState<Section[]>([])
+  const [ttName, setTtName]             = useState('Semester Timetable')
+  const [generating, setGenerating]     = useState(false)
+  const [generationResult, setGenerationResult] = useState<GenerateTimetableResponse | null>(null)
 
   // Form states
+  const [newInstitution, setNewInstitution] = useState({
+    name: '',
+    working_days: [0, 1, 2, 3, 4],
+    periods_per_day: {
+      '0': [0,1,2,3,4,5,6,7],
+      '1': [0,1,2,3,4,5,6,7],
+      '2': [0,1,2,3,4,5,6,7],
+      '3': [0,1,2,3,4,5,6,7],
+      '4': [0,1,2,3,4,5,6,7],
+    },
+    break_slots: {
+      '0': [3], '1': [3], '2': [3], '3': [3], '4': [3],
+    },
+    period_duration_minutes: 50,
+    start_time: '09:00',
+  })
+  const [newDepartment, setNewDepartment] = useState({ name: '' })
   const [newRoom,    setNewRoom]    = useState({ name: '', capacity: 60, room_type: 'classroom' })
   const [newFaculty, setNewFaculty] = useState({ name: '', email: '', subjects: '' })
   const [newCourse,  setNewCourse]  = useState({ name: '', code: '', theory_hours: 3, practical_hours: 0, credit_hours: 3, is_core: false, requires_lab: false })
   const [newSection, setNewSection] = useState({ name: '', student_count: 60, semester: 5 })
 
-  useEffect(() => { API.getInstitutions().then(setInstitutions) }, [])
   useEffect(() => {
-    if (!selInst) return
-    API.getDepartments(selInst).then(d => { setDepartments(d); if (d.length) setSelDept(d[0].id) })
+    API.getInstitutions().then(data => {
+      setInstitutions(data)
+      if (data.length && !selInst) setSelInst(data[0].id)
+    })
+  }, [])
+  useEffect(() => {
+    if (!selInst) {
+      setDepartments([])
+      setSelDept(null)
+      setRooms([])
+      setFaculty([])
+      return
+    }
+    API.getDepartments(selInst).then(d => {
+      setDepartments(d)
+      setSelDept(prev => (prev && d.some(dep => dep.id === prev)) ? prev : (d[0]?.id ?? null))
+    })
     API.getRooms(selInst).then(setRooms)
     API.getFaculty(selInst).then(setFaculty)
   }, [selInst])
   useEffect(() => {
-    if (!selDept) return
+    if (!selDept) {
+      setCourses([])
+      setSections([])
+      return
+    }
     API.getCourses(selDept).then(setCourses)
     API.getSections(selDept).then(setSections)
   }, [selDept])
+
+  const addInstitution = async () => {
+    if (!newInstitution.name.trim()) return toast.error('Fill in institution name')
+    try {
+      const institution = await API.createInstitution({ ...newInstitution, name: newInstitution.name.trim() })
+      setInstitutions(prev => [...prev, institution])
+      setSelInst(institution.id)
+      setNewInstitution(prev => ({ ...prev, name: '' }))
+      toast.success('Institution added')
+    } catch {
+      toast.error('Failed to add institution')
+    }
+  }
+
+  const addDepartment = async () => {
+    if (!selInst) return toast.error('Select an institution first')
+    if (!newDepartment.name.trim()) return toast.error('Fill in department name')
+    try {
+      const department = await API.createDepartment({ institution_id: selInst, name: newDepartment.name.trim() })
+      setDepartments(prev => [...prev, department])
+      setSelDept(department.id)
+      setNewDepartment({ name: '' })
+      toast.success('Department added')
+    } catch {
+      toast.error('Failed to add department')
+    }
+  }
 
   const addRoom = async () => {
     if (!selInst || !newRoom.name) return toast.error('Fill in room name')
@@ -157,6 +256,58 @@ export default function Setup() {
     } catch { toast.error('Failed to add section') }
   }
 
+  const canGenerate = !!selInst
+
+  const missingSetupReasons = [
+    !rooms.length ? 'Add at least one room so classes can be assigned a place.' : null,
+    !faculty.length ? 'Add faculty members so every course can be assigned to a teacher.' : null,
+    selInst && !departments.length ? 'Add a department before creating courses and sections.' : null,
+    selDept && !courses.length ? 'Add courses for the selected department.' : null,
+    selDept && !sections.length ? 'Add sections for the selected department.' : null,
+  ].filter(Boolean) as string[]
+
+  const generateTimetable = async () => {
+    if (!selInst) return toast.error('Select an institution')
+
+    setGenerating(true)
+    setGenerationResult(null)
+    const t = toast.loading('Generating timetable… (this may take up to 60s)')
+
+    try {
+      const res = await API.generateTimetable({
+        institution_id: selInst,
+        name: ttName.trim() || 'Semester Timetable',
+        max_solve_seconds: 60,
+      })
+      setGenerationResult(res)
+      toast.dismiss(t)
+
+      if (res.status === 'done' || res.status === 'optimal' || res.status === 'feasible') {
+        toast.success(`Generated! ${res.num_slots} slots in ${res.solve_time}s`)
+      } else {
+        toast.error(`Generation stopped: ${res.status}`)
+      }
+    } catch (e: any) {
+      toast.dismiss(t)
+      const detail = e?.response?.data?.detail || 'Generation failed'
+      setGenerationResult({
+        timetable_id: 0,
+        status: 'error',
+        solve_time: 0,
+        num_slots: 0,
+        conflicts: [],
+        objective: 0,
+        warnings: [],
+        diagnostics: [{ type: 'request_error', description: detail, severity: 'hard' }],
+        unassigned_slots: [],
+        recovery_suggestions: [],
+      })
+      toast.error(detail)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
   return (
     <div className="space-y-5 animate-fade-in">
       <div>
@@ -165,23 +316,55 @@ export default function Setup() {
       </div>
 
       {/* Institution + Department selector */}
-      <div className="glass p-5 flex gap-4 items-end">
-        <div className="flex-1">
-          <label className="label">Institution</label>
-          <select className="select" value={selInst ?? ''} onChange={e => setSelInst(Number(e.target.value))}>
-            <option value="" disabled>Select institution…</option>
-            {institutions.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
-          </select>
+      <div className="glass p-5 space-y-4">
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="label">Institution</label>
+            <select className="select" value={selInst ?? ''} onChange={e => setSelInst(Number(e.target.value) || null)}>
+              <option value="" disabled>Select institution…</option>
+              {institutions.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="label">Department</label>
+            <select className="select" value={selDept ?? ''} onChange={e => setSelDept(Number(e.target.value) || null)} disabled={!selInst}>
+              <option value="" disabled>{selInst ? 'Select department…' : 'Select institution first…'}</option>
+              {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </select>
+          </div>
         </div>
-        <div className="flex-1">
-          <label className="label">Department</label>
-          <select className="select" value={selDept ?? ''} onChange={e => setSelDept(Number(e.target.value))}>
-            <option value="" disabled>Select department…</option>
-            {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-          </select>
+
+        <div className="grid grid-cols-2 gap-4 items-end">
+          <div className="flex gap-2">
+            <input
+              className="input flex-1"
+              placeholder="Add new institution"
+              value={newInstitution.name}
+              onChange={e => setNewInstitution(prev => ({ ...prev, name: e.target.value }))}
+            />
+            <button className="btn-primary shrink-0" onClick={addInstitution}>
+              <Plus className="w-4 h-4" /> Add Institution
+            </button>
+          </div>
+          <div className="flex gap-2">
+            <input
+              className="input flex-1"
+              placeholder={selInst ? 'Add department to selected institution' : 'Select institution first'}
+              value={newDepartment.name}
+              onChange={e => setNewDepartment({ name: e.target.value })}
+              disabled={!selInst}
+            />
+            <button className="btn-secondary shrink-0" onClick={addDepartment} disabled={!selInst}>
+              <Plus className="w-4 h-4" /> Add Department
+            </button>
+          </div>
         </div>
-        <div className="text-xs text-slate-500 pb-3">
+
+        <div className="flex gap-2 flex-wrap text-xs text-slate-500">
           {selInst && <span className="badge-green">Institution #{selInst}</span>}
+          {selDept && <span className="badge-blue">Department #{selDept}</span>}
+          {!institutions.length && <span>No institutions yet. Create one above.</span>}
+          {!!institutions.length && selInst && !departments.length && <span>No departments yet for this institution.</span>}
         </div>
       </div>
 
@@ -314,6 +497,114 @@ export default function Setup() {
               </Panel>
             </>
           )}
+
+          <div className="glass p-5 border border-brand-600/20">
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-brand-400" />
+                  Generate Timetable
+                </h3>
+                <p className="text-slate-500 text-xs mt-1">
+                  Run the solver after setup is complete. If generation fails, the reasons will appear here with suggested fixes.
+                </p>
+              </div>
+              <button className="btn-secondary shrink-0" onClick={() => navigate('/what-if')}>
+                <FlaskConical className="w-4 h-4" />
+                What-If Analysis
+              </button>
+            </div>
+
+            <div className="grid grid-cols-[minmax(0,1fr),auto] gap-3 items-end">
+              <div>
+                <label className="label">Timetable Name</label>
+                <input
+                  className="input"
+                  placeholder="Semester Timetable"
+                  value={ttName}
+                  onChange={e => setTtName(e.target.value)}
+                />
+              </div>
+              <button
+                className="btn-primary py-3 px-6"
+                onClick={generateTimetable}
+                disabled={generating || !canGenerate}
+              >
+                {generating
+                  ? <><span className="spinner w-4 h-4" />Generating…</>
+                  : <><Sparkles className="w-4 h-4" />Generate Timetable</>}
+              </button>
+            </div>
+
+            {missingSetupReasons.length > 0 && (
+              <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+                <p className="text-xs font-semibold text-amber-300 mb-2">Common reasons generation may fail right now</p>
+                <div className="space-y-2">
+                  {missingSetupReasons.map(reason => (
+                    <div key={reason} className="flex items-start gap-2 text-xs text-slate-300">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                      <span>{reason}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {generationResult && (
+              <div className="mt-4 space-y-4">
+                <div className={clsx(
+                  'rounded-xl border p-4',
+                  generationResult.status === 'done' || generationResult.status === 'optimal' || generationResult.status === 'feasible'
+                    ? 'border-emerald-500/20 bg-emerald-500/5'
+                    : 'border-red-500/20 bg-red-500/5'
+                )}>
+                  <div className="flex items-center gap-2">
+                    {generationResult.status === 'done' || generationResult.status === 'optimal' || generationResult.status === 'feasible'
+                      ? <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                      : <AlertTriangle className="w-4 h-4 text-red-400" />}
+                    <p className="text-sm font-semibold text-slate-100">
+                      {generationResult.status === 'done' || generationResult.status === 'optimal' || generationResult.status === 'feasible'
+                        ? 'Timetable generated successfully'
+                        : 'Timetable could not be generated'}
+                    </p>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">
+                    Status: {generationResult.status} · Slots: {generationResult.num_slots} · Solve time: {generationResult.solve_time}s
+                  </p>
+                </div>
+
+                {generationResult.diagnostics.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-slate-300 mb-2">Why generation failed</p>
+                    <div className="space-y-2">
+                      {generationResult.diagnostics.map((item, index) => (
+                        <div key={`${item.type}-${index}`} className="glass-sm p-3 border-l-2 border-red-500">
+                          <p className="text-sm text-slate-200">{item.description}</p>
+                          <p className="text-[11px] text-slate-500 mt-1">
+                            Type: {item.type.replace(/_/g, ' ')} · Severity: {item.severity}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {generationResult.recovery_suggestions.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-slate-300 mb-2">What to fix next</p>
+                    <div className="space-y-2">
+                      {generationResult.recovery_suggestions.map(suggestion => (
+                        <div key={suggestion} className="flex items-start gap-2 text-xs text-slate-300">
+                          <ArrowRight className="w-3.5 h-3.5 text-brand-400 shrink-0 mt-0.5" />
+                          <span>{suggestion}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </>
       )}
     </div>

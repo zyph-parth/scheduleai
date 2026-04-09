@@ -24,8 +24,9 @@ Soft constraints (objective minimization):
   - Faculty consecutive period load (penalize >3 back-to-back)
 """
 
-import time
 import logging
+import time
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from ortools.sat.python import cp_model
@@ -108,6 +109,10 @@ class TimetableSolver:
         # Build session list + CP variables
         self.sessions: List[Dict] = []
         self.all_vars: Dict[Tuple, Any] = {}   # (session_id, day, period) → BoolVar
+        self.session_room_candidates: Dict[int, List[Dict[str, Any]]] = {}
+        self.impossible_sessions: List[Dict[str, Any]] = []
+        self.locked_slot_issues: List[Dict[str, Any]] = []
+        self.unassigned_entries: List[Dict[str, Any]] = []
 
     # ── Slot helpers ──────────────────────────────────────────────────────────
 
@@ -136,6 +141,41 @@ class TimetableSolver:
 
     def _valid_slots_for(self, stype: str) -> List[Tuple[int, int]]:
         return self.valid_lab_starts if stype == "lab" else self.valid_theory_slots
+
+    def _student_count_for(self, section_ids: List[int], slot_type: str) -> int:
+        total = sum(self.section_map.get(section_id, {}).get("student_count", 0) for section_id in section_ids)
+        if slot_type == "lab":
+            return max(1, math.ceil(total / 2))
+        return total
+
+    def _candidate_rooms_for_session(self, sess: Dict[str, Any]) -> List[Dict[str, Any]]:
+        student_count = self._student_count_for(sess["section_ids"], sess["type"])
+        need_lab = sess["type"] == "lab"
+        candidates = []
+        for room in self.room_map.values():
+            effective_capacity = room["capacity"] + (1 if need_lab else 0)
+            if effective_capacity < student_count:
+                continue
+            if need_lab and room["room_type"] != "lab":
+                continue
+            if not need_lab and room["room_type"] == "lab":
+                continue
+            candidates.append(room)
+        return sorted(candidates, key=lambda room: room["capacity"])
+
+    def _build_conflict(
+        self,
+        conflict_type: str,
+        description: str,
+        severity: str = "hard",
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "type": conflict_type,
+            "severity": severity,
+            "description": description,
+            "meta": meta or {},
+        }
 
     def _occupies_period(self, stype: str, start_p: int, day: int, check_p: int) -> bool:
         """Does a session of stype, starting at start_p, occupy check_p?"""
@@ -253,12 +293,42 @@ class TimetableSolver:
                 sid += 1
 
         self.sessions = sessions
+        for sess in self.sessions:
+            sid = sess["session_id"]
+            rooms = self._candidate_rooms_for_session(sess)
+            self.session_room_candidates[sid] = rooms
+            if rooms:
+                continue
+
+            course = self.course_map.get(sess["course_id"], {})
+            needed_capacity = self._student_count_for(sess["section_ids"], sess["type"])
+            conflict_type = "lab_room_shortage" if sess["type"] == "lab" else "room_capacity_shortage"
+            room_label = "lab room" if sess["type"] == "lab" else "teaching room"
+            self.impossible_sessions.append(
+                self._build_conflict(
+                    conflict_type,
+                    (
+                        f"No {room_label} can host {course.get('name', 'the course')} "
+                        f"for {needed_capacity} students."
+                    ),
+                    meta={
+                        "course_id": sess["course_id"],
+                        "course_name": course.get("name"),
+                        "faculty_id": sess["faculty_id"],
+                        "faculty_name": self.faculty_map.get(sess["faculty_id"], {}).get("name"),
+                        "section_ids": sess["section_ids"],
+                        "needed_capacity": needed_capacity,
+                    },
+                )
+            )
 
     # ── Variable creation ─────────────────────────────────────────────────────
 
     def _create_vars(self):
         for sess in self.sessions:
             sid = sess["session_id"]
+            if not self.session_room_candidates.get(sid):
+                continue
             for d, p in self._valid_slots_for(sess["type"]):
                 self.all_vars[(sid, d, p)] = self.model.NewBoolVar(
                     f"x_{sid}_{d}_{p}"
@@ -279,9 +349,25 @@ class TimetableSolver:
             if vars_:
                 self.model.AddExactlyOne(vars_)
             else:
-                logger.warning(
-                    "Session %d (course %d, %s) has NO valid slots – infeasible!",
-                    sid, sess["course_id"], stype
+                course = self.course_map.get(sess["course_id"], {})
+                faculty = self.faculty_map.get(sess["faculty_id"], {})
+                self.impossible_sessions.append(
+                    self._build_conflict(
+                        "no_valid_slot",
+                        (
+                            f"No valid slot remains for {course.get('name', 'the course')} "
+                            f"with {faculty.get('name', 'the assigned faculty')}."
+                        ),
+                        meta={
+                            "course_id": sess["course_id"],
+                            "course_name": course.get("name"),
+                            "faculty_id": sess["faculty_id"],
+                            "faculty_name": faculty.get("name"),
+                            "section_ids": sess["section_ids"],
+                            "slot_type": stype,
+                            "occurrence": sess["occurrence"],
+                        },
+                    )
                 )
 
     def _c_faculty_no_double(self):
@@ -327,6 +413,7 @@ class TimetableSolver:
             d, p  = ls["day"], ls["period"]
             stype = ls.get("type", "theory")
             occ   = ls.get("occurrence", 0)
+            matched = False
 
             for sess in self.sessions:
                 if (
@@ -335,10 +422,41 @@ class TimetableSolver:
                     and sess["type"] == stype
                     and sess["occurrence"] == occ
                 ):
+                    matched = True
                     sid = sess["session_id"]
                     if (sid, d, p) in self.all_vars:
                         self.model.Add(self.all_vars[(sid, d, p)] == 1)
+                    else:
+                        self.locked_slot_issues.append(
+                            self._build_conflict(
+                                "locked_slot_conflict",
+                                f"Locked slot for course {c_id} cannot stay on day {d}, period {p}.",
+                                meta={
+                                    "section_id": s_id,
+                                    "course_id": c_id,
+                                    "day": d,
+                                    "period": p,
+                                    "occurrence": occ,
+                                    "slot_type": stype,
+                                },
+                            )
+                        )
                     break
+            if not matched:
+                self.locked_slot_issues.append(
+                    self._build_conflict(
+                        "locked_slot_conflict",
+                        f"Locked slot target for course {c_id} occurrence {occ} does not exist.",
+                        meta={
+                            "section_id": s_id,
+                            "course_id": c_id,
+                            "day": d,
+                            "period": p,
+                            "occurrence": occ,
+                            "slot_type": stype,
+                        },
+                    )
+                )
 
     def _c_soft_and_objective(self):
         """
@@ -383,9 +501,6 @@ class TimetableSolver:
         rooms_sorted = sorted(
             self.room_map.values(), key=lambda r: r["capacity"]
         )
-        lab_rooms   = [r for r in rooms_sorted if r["room_type"] == "lab"]
-        class_rooms = [r for r in rooms_sorted if r["room_type"] != "lab"]
-
         # room_usage[(day, period)] → set of room_ids in use
         room_usage: Dict[Tuple, set] = {}
 
@@ -399,20 +514,11 @@ class TimetableSolver:
             return [(d, p)]
 
         for entry in schedule:
-            student_count = sum(
-                self.section_map.get(sid, {}).get("student_count", 30)
-                for sid in entry.get("section_ids", [entry.get("section_id", 0)])
-            )
-            need_lab = entry["slot_type"] == "lab"
-            candidates = (lab_rooms + class_rooms) if need_lab else (class_rooms + lab_rooms)
-
             occupied = _occupied_periods(entry)
+            candidates = self.session_room_candidates.get(entry["session_id"], [])
             assigned = None
 
             for room in candidates:
-                if room["capacity"] < student_count:
-                    continue
-                # Check all occupied periods are free for this room
                 if all(
                     room["id"] not in room_usage.get(slot, set())
                     for slot in occupied
@@ -428,6 +534,7 @@ class TimetableSolver:
             else:
                 entry["room_id"]   = None
                 entry["room_name"] = "UNASSIGNED"
+                self.unassigned_entries.append(entry)
 
         return schedule
 
@@ -450,6 +557,7 @@ class TimetableSolver:
                             period      = p,
                             duration    = 2 if sess["type"] == "lab" else 1,
                             slot_type   = sess["type"],
+                            occurrence  = sess["occurrence"],
                             is_combined = sess.get("is_combined", False),
                             is_modified = False,
                         ))
@@ -466,7 +574,12 @@ class TimetableSolver:
           - Faculty overloaded (total hours > available slots)
           - No lab slots of length 2 available for lab courses
         """
-        conflicts = []
+        conflicts: List[Dict[str, Any]] = []
+
+        if self.impossible_sessions:
+            conflicts.extend(self.impossible_sessions)
+        if self.locked_slot_issues:
+            conflicts.extend(self.locked_slot_issues)
 
         # Check per-section slot demand
         section_demand: Dict[int, int] = {}
@@ -500,6 +613,12 @@ class TimetableSolver:
                         f"but only {avail} slots are available per week. "
                         f"Reduce courses or add more periods."
                     ),
+                    "meta": {
+                        "section_id": s_id,
+                        "section_name": sec.get("name", s_id),
+                        "required_periods": demand,
+                        "available_periods": avail,
+                    },
                 })
 
         # Faculty overload
@@ -526,19 +645,48 @@ class TimetableSolver:
                         f"but only {avail} available slots. "
                         f"Reassign some courses."
                     ),
+                    "meta": {
+                        "faculty_id": f_id,
+                        "faculty_name": fac.get("name", f_id),
+                        "required_periods": demand,
+                        "available_periods": avail,
+                    },
                 })
 
         if not conflicts:
-            conflicts.append({
-                "type": "unknown",
-                "severity": "hard",
-                "description": (
-                    "No valid timetable found within the time limit. "
-                    "Try relaxing constraints: reduce unavailable slots, "
-                    "add more rooms, or increase working days."
-                ),
-            })
+            conflicts.append(
+                self._build_conflict(
+                    "unknown",
+                    (
+                        "No valid timetable found within the time limit. "
+                        "Try relaxing constraints: reduce unavailable slots, add more rooms, or increase working days."
+                    ),
+                )
+            )
 
+        return conflicts
+
+    def _room_conflicts(self) -> List[Dict[str, Any]]:
+        conflicts = []
+        for entry in self.unassigned_entries:
+            course = self.course_map.get(entry["course_id"], {})
+            conflict_type = "lab_room_shortage" if entry["slot_type"] == "lab" else "room_capacity_shortage"
+            conflicts.append(
+                self._build_conflict(
+                    conflict_type,
+                    (
+                        f"No room was available for {course.get('name', 'the course')} "
+                        f"on day {entry['day']}, period {entry['period']}."
+                    ),
+                    meta={
+                        "course_id": entry["course_id"],
+                        "course_name": course.get("name"),
+                        "day": entry["day"],
+                        "period": entry["period"],
+                        "needed_capacity": self._student_count_for(entry.get("section_ids", []), entry["slot_type"]),
+                    },
+                )
+            )
         return conflicts
 
     # ── Main solve ────────────────────────────────────────────────────────────
@@ -553,6 +701,18 @@ class TimetableSolver:
                 "message": "No sessions to schedule. Add courses and section assignments first.",
                 "schedule": [],
                 "conflicts": [],
+            }
+
+        if self.impossible_sessions:
+            conflicts = self._analyze_conflicts()
+            return {
+                "status": "infeasible",
+                "schedule": [],
+                "conflicts": conflicts,
+                "diagnostics": conflicts,
+                "warnings": [],
+                "unassigned_slots": [],
+                "num_sessions": len(self.sessions),
             }
 
         logger.info("Creating %d sessions, %d CP variables …", len(self.sessions), 0)
@@ -579,10 +739,25 @@ class TimetableSolver:
         if status_code in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             schedule = self._extract()
             schedule = self._assign_rooms(schedule)
+            if self.unassigned_entries:
+                conflicts = self._room_conflicts()
+                return {
+                    "status": "infeasible",
+                    "schedule": [],
+                    "conflicts": conflicts,
+                    "diagnostics": conflicts,
+                    "warnings": [],
+                    "unassigned_slots": self.unassigned_entries,
+                    "objective": self.cp_solver.ObjectiveValue(),
+                    "num_sessions": len(self.sessions),
+                }
             return {
                 "status": "optimal" if status_code == cp_model.OPTIMAL else "feasible",
                 "schedule": schedule,
                 "conflicts": [],
+                "diagnostics": [],
+                "warnings": [],
+                "unassigned_slots": [],
                 "objective": self.cp_solver.ObjectiveValue(),
                 "num_sessions": len(self.sessions),
             }
@@ -592,5 +767,8 @@ class TimetableSolver:
                 "status": "infeasible",
                 "schedule": [],
                 "conflicts": conflicts,
+                "diagnostics": conflicts,
+                "warnings": [],
+                "unassigned_slots": [],
                 "num_sessions": len(self.sessions),
             }

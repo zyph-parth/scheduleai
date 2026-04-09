@@ -71,10 +71,52 @@ def parse_constraint_local(text: str) -> Dict[str, Any]:
 
     faculty_re = re.search(r"(?:dr\.?|prof\.?|mr\.?|ms\.?)\s+(\w+)", text, re.I)
     faculty_name = faculty_re.group(1) if faculty_re else None
+    if faculty_name is None:
+        absent_re = re.search(r"(?:teacher|faculty|professor|lecturer)\s+([a-z][a-z\s]+)", text, re.I)
+        if absent_re:
+            faculty_name = absent_re.group(1).strip()
+
+    action_type = "constraint"
+
+    if any(w in text_lower for w in ["absent", "on leave", "leave today", "sick", "cannot come"]):
+        result.update({
+            "type": "faculty_absence",
+            "action_type": "faculty_absence",
+            "faculty_name": faculty_name,
+            "affected_days": [day_found] if day_found is not None else [],
+            "description": f"Mark {faculty_name or 'faculty'} absent and regenerate affected timetable slots",
+            "confidence": 0.75,
+        })
+        return result
+
+    if any(w in text_lower for w in ["cancel class", "cancel lecture", "cancel lab", "cancel session"]):
+        result.update({
+            "type": "cancel_session",
+            "action_type": "cancel_session",
+            "faculty_name": faculty_name,
+            "affected_days": [day_found] if day_found is not None else [],
+            "period": period_found if period_found >= 0 else None,
+            "description": f"Cancel the affected teaching slot for {faculty_name or 'the faculty member'}",
+            "confidence": 0.7,
+        })
+        return result
+
+    if "reschedule" in text_lower or "move class" in text_lower or "shift class" in text_lower:
+        result.update({
+            "type": "reschedule_request",
+            "action_type": "reschedule_request",
+            "faculty_name": faculty_name,
+            "affected_days": [day_found] if day_found is not None else [],
+            "period": period_found if period_found >= 0 else None,
+            "description": f"Reschedule the affected class for {faculty_name or 'the faculty member'}",
+            "confidence": 0.7,
+        })
+        return result
 
     if any(w in text_lower for w in ["cannot teach", "not available", "unavailable", "busy"]):
         result.update({
             "type": "unavailability",
+            "action_type": "update_faculty_availability",
             "faculty_name": faculty_name,
             "day": day_found,
             "period": period_found if period_found >= 0 else None,
@@ -89,6 +131,7 @@ def parse_constraint_local(text: str) -> Dict[str, Any]:
         course_re = re.search(r"(?:subject|course)?\s*['\"]?(\w[\w\s]*?)(?:['\"])?\s+(?:must|should)", text, re.I)
         result.update({
             "type": "core_priority",
+            "action_type": "mark_course_priority",
             "course_name": course_re.group(1).strip() if course_re else None,
             "preferred_periods": [0, 1, 2],
             "description": "Schedule course in morning slots (periods 0-2)",
@@ -100,6 +143,7 @@ def parse_constraint_local(text: str) -> Dict[str, Any]:
     if consec_re:
         result.update({
             "type": "max_consecutive",
+            "action_type": "update_faculty_max_consecutive",
             "faculty_name": faculty_name,
             "max_periods": int(consec_re.group(1)),
             "description": f"Limit consecutive teaching to {consec_re.group(1)} periods",
@@ -109,6 +153,7 @@ def parse_constraint_local(text: str) -> Dict[str, Any]:
     # Generic fallback
     result.update({
         "type": "generic",
+        "action_type": action_type,
         "description": f"Constraint noted: {text}",
         "confidence": 0.3,
     })
@@ -128,7 +173,8 @@ async def parse_constraint_claude(text: str, api_key: str) -> Dict[str, Any]:
 Convert natural language scheduling constraints into structured JSON.
 
 The JSON must have these fields:
-  type: one of [unavailability, max_consecutive, core_priority, day_restriction, workload_balance, custom]
+  type: one of [faculty_absence, cancel_session, reschedule_request, unavailability, max_consecutive, core_priority, day_restriction, workload_balance, custom]
+  action_type: one of [faculty_absence, cancel_session, reschedule_request, update_faculty_availability, update_faculty_max_consecutive, mark_course_priority, constraint]
   faculty_name: string or null
   course_name: string or null
   day: integer 0-6 (Mon=0, Sun=6) or null
@@ -138,6 +184,7 @@ The JSON must have these fields:
   max_periods: integer or null (for consecutive limits)
   preferred_periods: list of ints or null
   excluded_days: list of ints or null
+  affected_days: list of ints or null
   confidence: float 0.0-1.0 (your confidence in the parse)
   description: short human-readable summary of what this constraint does
 

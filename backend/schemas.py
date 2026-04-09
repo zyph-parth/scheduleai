@@ -161,11 +161,26 @@ class NLPConstraintRequest(BaseModel):
     text: str
 
 
+class NLPExecuteRequest(BaseModel):
+    institution_id: int
+    text: str
+    timetable_id: Optional[int] = None
+
+
 class NLPConstraintResponse(BaseModel):
     original_text: str
     parsed: Dict[str, Any]
     confidence: float
     description: str
+
+
+class NLPExecuteResponse(BaseModel):
+    original_text: str
+    parsed: Dict[str, Any]
+    action_type: str
+    executed: bool
+    description: str
+    result: Dict[str, Any] = {}
 
 
 # ─── Slot responses ───────────────────────────────────────────────────────────
