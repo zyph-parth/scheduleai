@@ -813,6 +813,8 @@ def create_section_course(body: SectionCourseCreate, db: Session = Depends(get_d
         raise _bad_request("Course and section must belong to the same department")
     if faculty.institution_id != section.department.institution_id:
         raise _bad_request("Faculty must belong to the same institution as the section")
+    if not _faculty_subject_match(course, faculty):
+        raise _bad_request("Selected faculty is not eligible to teach this course")
     duplicate = db.query(SectionCourse).filter(
         SectionCourse.section_id == body.section_id,
         SectionCourse.course_id == body.course_id,
@@ -865,6 +867,8 @@ def create_combined_group(body: CombinedGroupCreate, db: Session = Depends(get_d
         raise _bad_request("One or more selected sections do not exist")
     if faculty.institution_id != inst.id:
         raise _bad_request("Faculty must belong to the same institution")
+    if not _faculty_subject_match(course, faculty):
+        raise _bad_request("Selected faculty is not eligible to teach this course")
     if any(section.department.institution_id != inst.id for section in sections):
         raise _bad_request("All sections must belong to the selected institution")
     department_ids = {section.department_id for section in sections}
@@ -1067,13 +1071,20 @@ def _faculty_subject_match(course: Optional[Course], faculty: Faculty) -> bool:
     if not course:
         return False
 
-    course_name = (course.name or "").strip().lower()
-    if not course_name:
+    candidates = {
+        _normalize_name(course.name).lower(),
+        _normalize_name(course.code).lower(),
+    }
+    candidates = {value for value in candidates if value}
+    if not candidates:
         return False
 
     for subject in faculty.subjects or []:
-        normalized = (subject or "").strip().lower()
-        if normalized and (course_name in normalized or normalized in course_name):
+        normalized = _normalize_name(subject).lower()
+        if normalized and any(
+            normalized == candidate or normalized in candidate or candidate in normalized
+            for candidate in candidates
+        ):
             return True
     return False
 

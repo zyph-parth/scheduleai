@@ -147,6 +147,23 @@ function toggleUnavailableSlot(
   return [...slots, target].sort((a, b) => (a.day - b.day) || (a.period - b.period))
 }
 
+function canFacultyTeachCourse(
+  course: Course | undefined,
+  faculty: Faculty | undefined,
+) {
+  if (!course || !faculty) return false
+  const candidates = [course.name, course.code]
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean)
+  if (!candidates.length) return false
+  return (faculty.subjects || []).some((subject) => {
+    const normalized = subject.trim().toLowerCase()
+    return normalized && candidates.some((candidate) =>
+      normalized === candidate || normalized.includes(candidate) || candidate.includes(normalized),
+    )
+  })
+}
+
 function getPeriodList(inst?: Institution | null, day?: number) {
   if (!inst || day === undefined) return []
   return inst.periods_per_day[String(day)] || []
@@ -346,6 +363,22 @@ export default function Setup() {
   const sectionMap = useMemo(() => Object.fromEntries(sections.map((section) => [section.id, section])), [sections])
   const courseMap = useMemo(() => Object.fromEntries(courses.map((course) => [course.id, course])), [courses])
   const facultyMap = useMemo(() => Object.fromEntries(faculty.map((member) => [member.id, member])), [faculty])
+  const selectedAssignmentCourse = useMemo(
+    () => courses.find((course) => course.id === newAssignment.course_id),
+    [courses, newAssignment.course_id],
+  )
+  const eligibleAssignmentFaculty = useMemo(
+    () => faculty.filter((member) => canFacultyTeachCourse(selectedAssignmentCourse, member)),
+    [faculty, selectedAssignmentCourse],
+  )
+  const selectedCombinedCourse = useMemo(
+    () => courses.find((course) => course.id === newCombinedGroup.course_id),
+    [courses, newCombinedGroup.course_id],
+  )
+  const eligibleCombinedFaculty = useMemo(
+    () => faculty.filter((member) => canFacultyTeachCourse(selectedCombinedCourse, member)),
+    [faculty, selectedCombinedCourse],
+  )
 
   const visibleCombinedGroups = useMemo(() => {
     const sectionIds = new Set(sections.map((section) => section.id))
@@ -472,6 +505,24 @@ export default function Setup() {
     }))
   }, [courses, faculty, sections])
 
+  useEffect(() => {
+    setNewAssignment((current) => ({
+      ...current,
+      faculty_id: eligibleAssignmentFaculty.some((member) => member.id === current.faculty_id)
+        ? current.faculty_id
+        : eligibleAssignmentFaculty[0]?.id || 0,
+    }))
+  }, [eligibleAssignmentFaculty])
+
+  useEffect(() => {
+    setNewCombinedGroup((current) => ({
+      ...current,
+      faculty_id: eligibleCombinedFaculty.some((member) => member.id === current.faculty_id)
+        ? current.faculty_id
+        : eligibleCombinedFaculty[0]?.id || 0,
+    }))
+  }, [eligibleCombinedFaculty])
+
   const createInstitution = async () => {
     try {
       const created = await API.createInstitution(buildInstitutionPayload(institutionForm))
@@ -595,6 +646,10 @@ export default function Setup() {
       toast.error('Choose section, course, and faculty first')
       return
     }
+    if (!eligibleAssignmentFaculty.some((member) => member.id === newAssignment.faculty_id)) {
+      toast.error('Selected faculty cannot teach this course')
+      return
+    }
     try {
       await API.createSectionCourse(newAssignment)
       toast.success('Section-course assignment added')
@@ -608,6 +663,10 @@ export default function Setup() {
     if (!selInst) return
     if (newCombinedGroup.section_ids.length < 2 || !newCombinedGroup.course_id || !newCombinedGroup.faculty_id) {
       toast.error('Select at least two sections, one course, and one faculty member')
+      return
+    }
+    if (!eligibleCombinedFaculty.some((member) => member.id === newCombinedGroup.faculty_id)) {
+      toast.error('Selected faculty cannot teach this course')
       return
     }
     try {
@@ -990,7 +1049,13 @@ export default function Setup() {
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
               <div><label className={labelCls}>Section</label><select className={selectCls} value={newAssignment.section_id} onChange={(event) => setNewAssignment((current) => ({ ...current, section_id: Number(event.target.value) }))}><option value={0}>Select section…</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select></div>
               <div><label className={labelCls}>Course</label><select className={selectCls} value={newAssignment.course_id} onChange={(event) => setNewAssignment((current) => ({ ...current, course_id: Number(event.target.value) }))}><option value={0}>Select course…</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></div>
-              <div><label className={labelCls}>Faculty</label><select className={selectCls} value={newAssignment.faculty_id} onChange={(event) => setNewAssignment((current) => ({ ...current, faculty_id: Number(event.target.value) }))}><option value={0}>Select faculty…</option>{faculty.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select></div>
+              <div>
+                <label className={labelCls}>Faculty</label>
+                <select className={selectCls} value={newAssignment.faculty_id} onChange={(event) => setNewAssignment((current) => ({ ...current, faculty_id: Number(event.target.value) }))} disabled={!eligibleAssignmentFaculty.length}>
+                  <option value={0} disabled>{eligibleAssignmentFaculty.length ? 'Select faculty…' : 'No eligible faculty'}</option>
+                  {eligibleAssignmentFaculty.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
+                </select>
+              </div>
               <div className="flex items-end"><button className={`${btnPrimary} w-full justify-center`} onClick={addAssignment}><Plus className="w-4 h-4" />Add Assignment</button></div>
             </div>
 
@@ -1030,7 +1095,13 @@ export default function Setup() {
                   </div>
                 </div>
                 <div><label className={labelCls}>Shared Course</label><select className={selectCls} value={newCombinedGroup.course_id} onChange={(event) => setNewCombinedGroup((current) => ({ ...current, course_id: Number(event.target.value) }))}><option value={0}>Select course…</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></div>
-                <div><label className={labelCls}>Faculty</label><select className={selectCls} value={newCombinedGroup.faculty_id} onChange={(event) => setNewCombinedGroup((current) => ({ ...current, faculty_id: Number(event.target.value) }))}><option value={0}>Select faculty…</option>{faculty.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select></div>
+                <div>
+                  <label className={labelCls}>Faculty</label>
+                  <select className={selectCls} value={newCombinedGroup.faculty_id} onChange={(event) => setNewCombinedGroup((current) => ({ ...current, faculty_id: Number(event.target.value) }))} disabled={!eligibleCombinedFaculty.length}>
+                    <option value={0} disabled>{eligibleCombinedFaculty.length ? 'Select faculty…' : 'No eligible faculty'}</option>
+                    {eligibleCombinedFaculty.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
+                  </select>
+                </div>
                 <button className={btnPrimary} onClick={addCombinedGroup}><Plus className="w-4 h-4" />Add Combined Group</button>
               </div>
 
