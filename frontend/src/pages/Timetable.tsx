@@ -31,12 +31,14 @@ const SHORT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const THEME_COLORS = {
   theory:   { bg: 'bg-[#1B4FD8]',  ring: 'ring-[#1B4FD8]/30' },
   lab:      { bg: 'bg-[#059669]',  ring: 'ring-[#059669]/30' },
+  break:    { bg: 'bg-[#D97706]',  ring: 'ring-[#D97706]/30' },
   combined: { bg: 'bg-[#D97706]',  ring: 'ring-[#D97706]/30' },
   modified: { bg: 'bg-[#DC2626]',  ring: 'ring-[#DC2626]/30' },
 }
 
 function getSlotColor(slot: Slot) {
   if (slot.is_modified) return THEME_COLORS.modified
+  if (slot.slot_type === 'break') return THEME_COLORS.break
   if (slot.is_combined) return THEME_COLORS.combined
   if (slot.slot_type === 'lab') return THEME_COLORS.lab
   return THEME_COLORS.theory
@@ -418,6 +420,9 @@ export default function TimetablePage() {
                                           {slot.slot_type === 'lab' && (
                                             <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-white/25 text-white font-bold tracking-wide uppercase">LAB</span>
                                           )}
+                                          {slot.slot_type === 'break' && (
+                                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-white/25 text-white font-bold tracking-wide uppercase">BREAK</span>
+                                          )}
                                           {slot.is_combined && (
                                             <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-white/25 text-white font-bold tracking-wide uppercase">COMBINED</span>
                                           )}
@@ -476,6 +481,7 @@ export default function TimetablePage() {
                 <p className="text-white font-bold text-base mb-3">{selSlot.course_name}</p>
                 <div className="flex gap-2 flex-wrap">
                   {selSlot.slot_type === 'lab' && <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/25 text-white font-bold uppercase tracking-wide">LAB</span>}
+                  {selSlot.slot_type === 'break' && <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/25 text-white font-bold uppercase tracking-wide">BREAK</span>}
                   {selSlot.is_combined && <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/25 text-white font-bold uppercase tracking-wide">COMBINED</span>}
                   {selSlot.is_locked && <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/25 text-white font-bold uppercase tracking-wide flex items-center gap-1"><Lock className="w-2.5 h-2.5" />LOCKED</span>}
                   {selSlot.is_modified && <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/25 text-white font-bold uppercase tracking-wide">MODIFIED</span>}

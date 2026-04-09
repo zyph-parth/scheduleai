@@ -4,12 +4,16 @@ All routes are defined inline for hackathon simplicity.
 """
 
 import logging
+import os
+import re
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
+import io
 
 from config import settings
 from database import get_db, init_db
@@ -28,31 +32,18 @@ from schemas import (
     SectionCourseCreate, SectionCourseOut,
     CombinedGroupCreate, CombinedGroupOut,
     GenerateRequest, WhatIfRequest, SubstituteRequest,
-    NLPConstraintRequest, NLPConstraintResponse, NLPExecuteRequest, NLPExecuteResponse,
+    NLPConstraintRequest, NLPConstraintResponse,
     SlotOut, TimetableOut, AnalyticsOut,
 )
 from solver.engine import solve_timetable
-from services.export_service import export_excel, export_pdf
 from services.nlp_service import parse_nlp_constraint
-from services.timetable_service import (
-    annotate_occurrences_from_slots,
-    bad_request,
-    build_analytics,
-    build_recovery_suggestions,
-    build_solver_input,
-    get_course,
-    get_department,
-    get_faculty,
-    get_institution as require_institution,
-    get_section,
-    group_entries_by_signature,
-    normalize_period_map,
-    occupied_periods,
-    slot_signature,
-)
+from services.export_service import export_excel, export_pdf
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_UNSET = object()
+VALID_ROOM_TYPES = {"classroom", "lab", "lecture_hall"}
 
 app = FastAPI(
     title="Intelligent Timetable Generator",
@@ -84,286 +75,264 @@ def health():
     return {"status": "ok", "version": "1.0.0"}
 
 
-def _collect_solver_entities(institution_id: int, db: Session):
-    institution = require_institution(institution_id, db)
+def _bad_request(message: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=message)
+
+
+def _normalize_name(value: str) -> str:
+    return " ".join((value or "").strip().split())
+
+
+def _parse_time_string(value: str) -> tuple[int, int]:
+    text = (value or "").strip()
+    if not re.fullmatch(r"\d{2}:\d{2}", text):
+        raise _bad_request("start_time must be in HH:MM format")
+    hour, minute = [int(part) for part in text.split(":")]
+    if hour not in range(24) or minute not in range(60):
+        raise _bad_request("start_time must be a valid 24-hour time")
+    return hour, minute
+
+
+def _normalize_period_map(raw_map: Dict[Any, List[int]], label: str) -> Dict[str, List[int]]:
+    normalized: Dict[str, List[int]] = {}
+    for raw_day, periods in (raw_map or {}).items():
+        try:
+            day = int(raw_day)
+        except (TypeError, ValueError):
+            raise _bad_request(f"{label} keys must be numeric day indexes")
+
+        if day < 0 or day > 6:
+            raise _bad_request(f"{label} day indexes must be between 0 and 6")
+
+        cleaned = sorted({int(period) for period in (periods or [])})
+        if any(period < 0 for period in cleaned):
+            raise _bad_request(f"{label} periods must be non-negative")
+        normalized[str(day)] = cleaned
+    return normalized
+
+
+def _validate_institution_payload(body: InstitutionCreate) -> Dict[str, Any]:
+    name = _normalize_name(body.name)
+    if not name:
+        raise _bad_request("Institution name is required")
+
+    working_days = sorted({int(day) for day in body.working_days})
+    if not working_days:
+        raise _bad_request("Select at least one working day")
+    if any(day < 0 or day > 6 for day in working_days):
+        raise _bad_request("working_days must be between 0 and 6")
+
+    _parse_time_string(body.start_time)
+    if body.period_duration_minutes <= 0:
+        raise _bad_request("period_duration_minutes must be greater than 0")
+
+    periods_per_day = _normalize_period_map(body.periods_per_day, "periods_per_day")
+    break_slots = _normalize_period_map(body.break_slots, "break_slots")
+
+    for day in working_days:
+        key = str(day)
+        if key not in periods_per_day or not periods_per_day[key]:
+            raise _bad_request(f"Provide at least one period for working day {day}")
+
+        invalid_breaks = set(break_slots.get(key, [])) - set(periods_per_day[key])
+        if invalid_breaks:
+            raise _bad_request(f"break_slots for day {day} must exist in periods_per_day")
+
+    return {
+        "name": name,
+        "working_days": working_days,
+        "periods_per_day": {str(day): periods_per_day[str(day)] for day in working_days},
+        "break_slots": {str(day): break_slots.get(str(day), []) for day in working_days},
+        "period_duration_minutes": body.period_duration_minutes,
+        "start_time": body.start_time.strip(),
+    }
+
+
+def _get_institution(db: Session, institution_id: int) -> Institution:
+    inst = db.query(Institution).filter(Institution.id == institution_id).first()
+    if not inst:
+        raise HTTPException(404, "Institution not found")
+    return inst
+
+
+def _get_department(db: Session, department_id: int) -> Department:
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(404, "Department not found")
+    return dept
+
+
+def _get_section(db: Session, section_id: int) -> Section:
+    section = db.query(Section).filter(Section.id == section_id).first()
+    if not section:
+        raise HTTPException(404, "Section not found")
+    return section
+
+
+def _get_course(db: Session, course_id: int) -> Course:
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(404, "Course not found")
+    return course
+
+
+def _get_faculty(db: Session, faculty_id: int) -> Faculty:
+    faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+    if not faculty:
+        raise HTTPException(404, "Faculty not found")
+    return faculty
+
+
+def _validate_unavailable_slots(inst: Institution, slots: List[Dict[str, Any]]) -> List[Dict[str, int]]:
+    normalized: List[Dict[str, int]] = []
+    seen = set()
+    for item in slots:
+        day = int(item["day"])
+        period = int(item["period"])
+        valid_periods = set(inst.periods_per_day.get(str(day), []))
+        if day not in inst.working_days:
+            raise _bad_request(f"Unavailable slot day {day} is not a working day")
+        if period not in valid_periods:
+            raise _bad_request(f"Unavailable period {period} is not valid for day {day}")
+        key = (day, period)
+        if key not in seen:
+            normalized.append({"day": day, "period": period})
+            seen.add(key)
+    return normalized
+
+
+def _ensure_no_slot_usage(db: Session, entity_name: str, **filters: Any) -> None:
+    if db.query(Slot).filter_by(**filters).first():
+        raise _bad_request(f"Cannot delete {entity_name} because it is already used in a timetable")
+
+
+def _validate_generation_readiness(institution_id: int, db: Session) -> None:
+    inst = _get_institution(db, institution_id)
+    departments = db.query(Department).filter(Department.institution_id == institution_id).all()
     sections = db.query(Section).join(Department).filter(Department.institution_id == institution_id).all()
-    section_ids = [section.id for section in sections]
-    courses = db.query(Course).join(Department).filter(Department.institution_id == institution_id).all()
     faculty = db.query(Faculty).filter(Faculty.institution_id == institution_id).all()
     rooms = db.query(Room).filter(Room.institution_id == institution_id).all()
-    section_courses = db.query(SectionCourse).filter(SectionCourse.section_id.in_(section_ids or [-1])).all()
+
+    issues: List[str] = []
+    if not departments:
+        issues.append("Add at least one department")
+    if not sections:
+        issues.append("Add at least one section")
+    if not faculty:
+        issues.append("Add at least one faculty member")
+    if not rooms:
+        issues.append("Add at least one room")
+
+    section_ids = [section.id for section in sections]
+    assignments = db.query(SectionCourse).filter(SectionCourse.section_id.in_(section_ids)).all() if section_ids else []
     combined_groups = db.query(CombinedGroup).filter(CombinedGroup.institution_id == institution_id).all()
-    return institution, sections, courses, faculty, rooms, section_courses, combined_groups
+    if not assignments and not combined_groups:
+        issues.append("Add at least one section-course assignment or combined group")
+
+    assigned_section_ids = {assignment.section_id for assignment in assignments}
+    for group in combined_groups:
+        assigned_section_ids.update(group.section_ids or [])
+    missing_sections = [section.name for section in sections if section.id not in assigned_section_ids]
+    if missing_sections:
+        issues.append(f"Assign courses to every section. Missing: {', '.join(missing_sections[:5])}")
+
+    if not any(room.room_type == "lab" for room in rooms):
+        practical_courses = db.query(Course).join(Department).filter(
+            Department.institution_id == institution_id,
+            Course.practical_hours > 0,
+        ).all()
+        if practical_courses:
+            issues.append("Add at least one lab room for courses with practical hours")
+
+    if issues:
+        raise _bad_request("; ".join(issues))
 
 
-def _build_solver_input_payload(
-    institution_id: int,
+def _slot_fits_schedule(
+    day: int,
+    period: int,
+    duration: int,
+    working_days: List[int],
+    periods_per_day: Dict[str, List[int]],
+) -> bool:
+    if day not in working_days:
+        return False
+
+    valid_periods = sorted(int(item) for item in (periods_per_day.get(str(day), []) or []))
+    if period not in valid_periods:
+        return False
+
+    length = max(int(duration or 1), 1)
+    start_index = valid_periods.index(period)
+    return len(valid_periods[start_index:start_index + length]) == length
+
+
+def _validate_institution_update_dependencies(
+    inst: Institution,
+    payload: Dict[str, Any],
     db: Session,
-    locked_slots: Optional[List[Dict[str, Any]]] = None,
-    max_seconds: int = 60,
-):
-    entity_sets = _collect_solver_entities(institution_id, db)
-    return build_solver_input(*entity_sets, locked_slots=locked_slots, max_seconds=max_seconds)
+) -> None:
+    faculty_conflicts = []
+    for fac in db.query(Faculty).filter(Faculty.institution_id == inst.id).all():
+        for slot in fac.unavailable_slots or []:
+            if not _slot_fits_schedule(
+                int(slot["day"]),
+                int(slot["period"]),
+                1,
+                payload["working_days"],
+                payload["periods_per_day"],
+            ):
+                faculty_conflicts.append(fac.name)
+                break
 
-
-def _validate_section_course_payload(body: SectionCourseCreate, db: Session):
-    section = get_section(body.section_id, db)
-    course = get_course(body.course_id, db)
-    faculty = get_faculty(body.faculty_id, db)
-    department = get_department(section.department_id, db)
-    if course.department_id != section.department_id:
-        raise bad_request("Section and course must belong to the same department")
-    if faculty.institution_id != department.institution_id:
-        raise bad_request("Faculty must belong to the same institution as the section")
-    existing = db.query(SectionCourse).filter(
-        SectionCourse.section_id == body.section_id,
-        SectionCourse.course_id == body.course_id,
-    ).first()
-    if existing:
-        raise bad_request("This section already has that course assigned")
-    return section, course, faculty, department
-
-
-def _validate_combined_group_payload(body: CombinedGroupCreate, db: Session):
-    institution = require_institution(body.institution_id, db)
-    course = get_course(body.course_id, db)
-    faculty = get_faculty(body.faculty_id, db)
-    if faculty.institution_id != institution.id:
-        raise bad_request("Faculty must belong to the same institution")
-    if len(set(body.section_ids)) < 2:
-        raise bad_request("Combined groups require at least two distinct sections")
-
-    sections = [get_section(section_id, db) for section_id in body.section_ids]
-    for section in sections:
-        department = get_department(section.department_id, db)
-        if department.institution_id != institution.id:
-            raise bad_request("All combined-group sections must belong to the same institution")
-
-    course_department = get_department(course.department_id, db)
-    if course_department.institution_id != institution.id:
-        raise bad_request("Course must belong to the same institution")
-
-    existing = db.query(CombinedGroup).filter(
-        CombinedGroup.institution_id == body.institution_id,
-        CombinedGroup.course_id == body.course_id,
-        CombinedGroup.faculty_id == body.faculty_id,
-    ).all()
-    body_set = set(body.section_ids)
-    for group in existing:
-        if set(group.section_ids or []) == body_set:
-            raise bad_request("An identical combined group already exists")
-
-    return institution, course, faculty, sections
-
-
-def _serialize_conflicts(conflicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [
-        {
-            "type": conflict.get("type", "unknown"),
-            "description": conflict.get("description", ""),
-            "severity": conflict.get("severity", "hard"),
-            "meta": conflict.get("meta", {}),
-        }
-        for conflict in conflicts
-    ]
-
-
-def _save_schedule(
-    timetable_id: int,
-    result: Dict[str, Any],
-    db: Session,
-    modified_signatures: Optional[set] = None,
-):
-    modified_signatures = modified_signatures or set()
-    for entry in result.get("schedule", []):
-        signature = slot_signature(entry, occurrence=entry.get("occurrence", 0))
-        slot = Slot(
-            timetable_id=timetable_id,
-            section_id=entry.get("section_id"),
-            section_ids=entry.get("section_ids", []),
-            course_id=entry["course_id"],
-            faculty_id=entry["faculty_id"],
-            room_id=entry.get("room_id"),
-            day=entry["day"],
-            period=entry["period"],
-            duration=entry.get("duration", 1),
-            slot_type=entry.get("slot_type", "theory"),
-            is_combined=entry.get("is_combined", False),
-            is_modified=signature in modified_signatures,
-        )
-        db.add(slot)
-
-    for conflict in _serialize_conflicts(result.get("conflicts", [])):
-        db.add(
-            ConstraintViolation(
-                timetable_id=timetable_id,
-                constraint_type=conflict["type"],
-                description=conflict["description"],
-                severity=conflict["severity"],
-            )
+    if faculty_conflicts:
+        names = ", ".join(sorted(set(faculty_conflicts))[:5])
+        raise _bad_request(
+            f"Update would invalidate faculty unavailability for: {names}. "
+            "Adjust those faculty records first."
         )
 
-    db.commit()
-
-
-def _enrich_slots(slots, db: Session) -> List[dict]:
-    occurrences = annotate_occurrences_from_slots(slots)
-    result = []
-    for sl in slots:
-        data = {column.name: getattr(sl, column.name) for column in sl.__table__.columns}
-        data["course_name"] = sl.course.name if sl.course else ""
-        data["faculty_name"] = sl.faculty.name if sl.faculty else ""
-        data["room_name"] = sl.room.name if sl.room else "TBD"
-        data["section_name"] = sl.section.name if sl.section else ""
-        data["occurrence"] = occurrences.get(sl.id, 0)
-        result.append(data)
-    return result
-
-
-def _resolve_faculty_by_name(institution_id: int, faculty_name: Optional[str], db: Session) -> Faculty:
-    if not faculty_name:
-        raise bad_request("Could not determine which faculty member you meant")
-    faculty_name_lower = faculty_name.strip().lower()
-    faculty_members = db.query(Faculty).filter(Faculty.institution_id == institution_id).all()
-    exact = next((fac for fac in faculty_members if fac.name.lower() == faculty_name_lower), None)
-    if exact:
-        return exact
-    contains = next((fac for fac in faculty_members if faculty_name_lower in fac.name.lower()), None)
-    if contains:
-        return contains
-    last_word = faculty_name_lower.split()[-1]
-    partial = next((fac for fac in faculty_members if last_word in fac.name.lower()), None)
-    if partial:
-        return partial
-    raise bad_request(f"No faculty member matched '{faculty_name}'")
-
-
-def _resolve_course_by_name(institution_id: int, course_name: Optional[str], db: Session) -> Course:
-    if not course_name:
-        raise bad_request("Could not determine which course you meant")
-    courses = db.query(Course).join(Department).filter(Department.institution_id == institution_id).all()
-    target = course_name.strip().lower()
-    exact = next((course for course in courses if course.name.lower() == target), None)
-    if exact:
-        return exact
-    partial = next((course for course in courses if target in course.name.lower()), None)
-    if partial:
-        return partial
-    raise bad_request(f"No course matched '{course_name}'")
-
-
-def _latest_done_timetable(institution_id: int, db: Session) -> Timetable:
-    timetable = db.query(Timetable).filter(
-        Timetable.institution_id == institution_id,
-        Timetable.status == "done",
-    ).order_by(Timetable.created_at.desc()).first()
-    if not timetable:
-        raise bad_request("No completed timetable exists yet for this institution")
-    return timetable
-
-
-def _apply_what_if(
-    timetable: Timetable,
-    absent_faculty_id: int,
-    affected_days: Optional[List[int]],
-    db: Session,
-) -> Dict[str, Any]:
-    institution = timetable.institution
-    periods_per_day = normalize_period_map(institution.periods_per_day or {})
-    applied_days = affected_days or list(institution.working_days or [])
-    slot_occurrences = annotate_occurrences_from_slots(timetable.slots)
-    original_slots = []
-    locked = []
-    affected_signatures = set()
-
-    for slot in timetable.slots:
-        occurrence = slot_occurrences.get(slot.id, 0)
-        signature = slot_signature(slot, occurrence)
-        original_slots.append(
-            {
-                "signature": signature,
-                "section_id": slot.section_id,
-                "section_ids": slot.section_ids,
-                "course_id": slot.course_id,
-                "faculty_id": slot.faculty_id,
-                "room_id": slot.room_id,
-                "day": slot.day,
-                "period": slot.period,
-                "duration": slot.duration,
-                "slot_type": slot.slot_type,
-                "occurrence": occurrence,
-            }
-        )
-        if slot.faculty_id == absent_faculty_id and slot.day in applied_days:
-            affected_signatures.add(signature)
-            continue
-        locked.append(
-            {
-                "section_id": slot.section_id,
-                "course_id": slot.course_id,
-                "type": slot.slot_type,
-                "occurrence": occurrence,
-                "day": slot.day,
-                "period": slot.period,
-            }
-        )
-
-    solver_input = _build_solver_input_payload(timetable.institution_id, db, locked_slots=locked)
-    for faculty in solver_input["faculty"]:
-        if faculty["id"] != absent_faculty_id:
-            continue
-        existing = list(faculty.get("unavailable_slots", []))
-        for day in applied_days:
-            for period in periods_per_day.get(day, []):
-                existing.append({"day": day, "period": period})
-        faculty["unavailable_slots"] = existing
-        break
-
-    result = solve_timetable(solver_input)
-    old_by_signature = {item["signature"]: item for item in original_slots}
-    new_by_signature = group_entries_by_signature(result.get("schedule", []))
-    modified_signatures = set()
-    for signature, new_entry in new_by_signature.items():
-        old_entry = old_by_signature.get(signature)
-        if signature in affected_signatures:
-            modified_signatures.add(signature)
-            continue
-        if not old_entry:
-            modified_signatures.add(signature)
-            continue
-        if (
-            old_entry["day"] != new_entry["day"]
-            or old_entry["period"] != new_entry["period"]
-            or old_entry["faculty_id"] != new_entry["faculty_id"]
-            or old_entry["room_id"] != new_entry.get("room_id")
-        ):
-            modified_signatures.add(signature)
-
-    new_timetable = Timetable(
-        institution_id=timetable.institution_id,
-        name=f"{timetable.name} (What-If)",
-        semester=timetable.semester,
-        status="done" if result.get("status") in ("optimal", "feasible") else result["status"],
-        solve_time=result.get("solve_time", 0),
+    timetable_conflicts = []
+    slots = (
+        db.query(Slot, Timetable.name)
+        .join(Timetable, Timetable.id == Slot.timetable_id)
+        .filter(Timetable.institution_id == inst.id)
+        .all()
     )
-    db.add(new_timetable)
-    db.commit()
-    db.refresh(new_timetable)
-    _save_schedule(new_timetable.id, result, db, modified_signatures=modified_signatures)
+    for slot, timetable_name in slots:
+        if not _slot_fits_schedule(
+            slot.day,
+            slot.period,
+            slot.duration,
+            payload["working_days"],
+            payload["periods_per_day"],
+        ):
+            timetable_conflicts.append(timetable_name)
 
-    enriched = _enrich_slots(db.query(Slot).filter(Slot.timetable_id == new_timetable.id).all(), db)
-    conflicts = _serialize_conflicts(result.get("conflicts", []))
+    if timetable_conflicts:
+        names = ", ".join(sorted(set(timetable_conflicts))[:5])
+        raise _bad_request(
+            f"Update would invalidate existing timetable slots in: {names}. "
+            "Delete or regenerate those timetables first."
+        )
+
+
+def _build_nlp_context(institution_id: int, db: Session) -> Dict[str, Any]:
+    inst = _get_institution(db, institution_id)
+    faculty_names = [
+        faculty.name
+        for faculty in db.query(Faculty).filter(Faculty.institution_id == institution_id).all()
+    ]
+    course_names = [
+        course.name
+        for course in db.query(Course).join(Department).filter(Department.institution_id == institution_id).all()
+    ]
     return {
-        "timetable_id": new_timetable.id,
-        "status": new_timetable.status,
-        "solve_time": new_timetable.solve_time,
-        "slots": enriched,
-        "modified_count": sum(1 for slot in enriched if slot.get("is_modified")),
-        "conflicts": conflicts,
-        "warnings": result.get("warnings", []),
-        "diagnostics": result.get("diagnostics", conflicts),
-        "unassigned_slots": result.get("unassigned_slots", []),
-        "recovery_suggestions": build_recovery_suggestions(conflicts),
+        "start_time": inst.start_time,
+        "period_duration_minutes": inst.period_duration_minutes,
+        "periods_per_day": inst.periods_per_day or {},
+        "faculty_names": faculty_names,
+        "course_names": course_names,
     }
 
 
@@ -373,7 +342,11 @@ def _apply_what_if(
 
 @app.post("/institutions", response_model=InstitutionOut)
 def create_institution(body: InstitutionCreate, db: Session = Depends(get_db)):
-    inst = Institution(**body.model_dump())
+    payload = _validate_institution_payload(body)
+    existing = db.query(Institution).filter(Institution.name == payload["name"]).first()
+    if existing:
+        raise _bad_request("An institution with this name already exists")
+    inst = Institution(**payload)
     db.add(inst); db.commit(); db.refresh(inst)
     return inst
 
@@ -393,10 +366,16 @@ def get_institution(inst_id: int, db: Session = Depends(get_db)):
 
 @app.put("/institutions/{inst_id}", response_model=InstitutionOut)
 def update_institution(inst_id: int, body: InstitutionCreate, db: Session = Depends(get_db)):
-    inst = db.query(Institution).filter(Institution.id == inst_id).first()
-    if not inst:
-        raise HTTPException(404, "Institution not found")
-    for k, v in body.model_dump().items():
+    inst = _get_institution(db, inst_id)
+    payload = _validate_institution_payload(body)
+    _validate_institution_update_dependencies(inst, payload, db)
+    duplicate = db.query(Institution).filter(
+        Institution.name == payload["name"],
+        Institution.id != inst_id,
+    ).first()
+    if duplicate:
+        raise _bad_request("An institution with this name already exists")
+    for k, v in payload.items():
         setattr(inst, k, v)
     db.commit(); db.refresh(inst)
     return inst
@@ -408,8 +387,17 @@ def update_institution(inst_id: int, body: InstitutionCreate, db: Session = Depe
 
 @app.post("/departments", response_model=DepartmentOut)
 def create_department(body: DepartmentCreate, db: Session = Depends(get_db)):
-    require_institution(body.institution_id, db)
-    dept = Department(**body.model_dump())
+    _get_institution(db, body.institution_id)
+    name = _normalize_name(body.name)
+    if not name:
+        raise _bad_request("Department name is required")
+    duplicate = db.query(Department).filter(
+        Department.institution_id == body.institution_id,
+        Department.name == name,
+    ).first()
+    if duplicate:
+        raise _bad_request("A department with this name already exists in the institution")
+    dept = Department(institution_id=body.institution_id, name=name)
     db.add(dept); db.commit(); db.refresh(dept)
     return dept
 
@@ -419,11 +407,38 @@ def list_departments(institution_id: int = Query(...), db: Session = Depends(get
     return db.query(Department).filter(Department.institution_id == institution_id).all()
 
 
+@app.put("/departments/{dept_id}", response_model=DepartmentOut)
+def update_department(dept_id: int, body: DepartmentCreate, db: Session = Depends(get_db)):
+    dept = _get_department(db, dept_id)
+    if body.institution_id != dept.institution_id:
+        raise _bad_request("Changing a department's institution is not supported")
+    name = _normalize_name(body.name)
+    if not name:
+        raise _bad_request("Department name is required")
+    duplicate = db.query(Department).filter(
+        Department.institution_id == dept.institution_id,
+        Department.name == name,
+        Department.id != dept_id,
+    ).first()
+    if duplicate:
+        raise _bad_request("A department with this name already exists in the institution")
+    dept.name = name
+    db.commit(); db.refresh(dept)
+    return dept
+
+
 @app.delete("/departments/{dept_id}")
 def delete_department(dept_id: int, db: Session = Depends(get_db)):
-    dept = db.query(Department).filter(Department.id == dept_id).first()
-    if not dept:
-        raise HTTPException(404, "Department not found")
+    dept = _get_department(db, dept_id)
+    section_ids = [section.id for section in dept.sections]
+    course_ids = [course.id for course in dept.courses]
+    if db.query(Slot).filter(Slot.section_id.in_(section_ids)).first() or db.query(Slot).filter(Slot.course_id.in_(course_ids)).first():
+        raise _bad_request("Cannot delete a department that is already used in a timetable")
+    if section_ids:
+        db.query(SectionCourse).filter(SectionCourse.section_id.in_(section_ids)).delete(synchronize_session=False)
+    if course_ids:
+        db.query(SectionCourse).filter(SectionCourse.course_id.in_(course_ids)).delete(synchronize_session=False)
+        db.query(CombinedGroup).filter(CombinedGroup.course_id.in_(course_ids)).delete(synchronize_session=False)
     db.delete(dept); db.commit()
     return {"ok": True}
 
@@ -434,8 +449,24 @@ def delete_department(dept_id: int, db: Session = Depends(get_db)):
 
 @app.post("/rooms", response_model=RoomOut)
 def create_room(body: RoomCreate, db: Session = Depends(get_db)):
-    require_institution(body.institution_id, db)
-    room = Room(**body.model_dump())
+    _get_institution(db, body.institution_id)
+    name = _normalize_name(body.name)
+    if not name:
+        raise _bad_request("Room name is required")
+    if body.room_type not in VALID_ROOM_TYPES:
+        raise _bad_request(f"room_type must be one of: {', '.join(sorted(VALID_ROOM_TYPES))}")
+    duplicate = db.query(Room).filter(
+        Room.institution_id == body.institution_id,
+        Room.name == name,
+    ).first()
+    if duplicate:
+        raise _bad_request("A room with this name already exists in the institution")
+    room = Room(
+        institution_id=body.institution_id,
+        name=name,
+        capacity=body.capacity,
+        room_type=body.room_type,
+    )
     db.add(room); db.commit(); db.refresh(room)
     return room
 
@@ -450,7 +481,27 @@ def update_room(room_id: int, body: RoomCreate, db: Session = Depends(get_db)):
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
         raise HTTPException(404, "Room not found")
-    for k, v in body.model_dump().items():
+    if body.institution_id != room.institution_id:
+        raise _bad_request("Changing a room's institution is not supported")
+    _get_institution(db, body.institution_id)
+    name = _normalize_name(body.name)
+    if not name:
+        raise _bad_request("Room name is required")
+    if body.room_type not in VALID_ROOM_TYPES:
+        raise _bad_request(f"room_type must be one of: {', '.join(sorted(VALID_ROOM_TYPES))}")
+    duplicate = db.query(Room).filter(
+        Room.institution_id == body.institution_id,
+        Room.name == name,
+        Room.id != room_id,
+    ).first()
+    if duplicate:
+        raise _bad_request("A room with this name already exists in the institution")
+    for k, v in {
+        "institution_id": body.institution_id,
+        "name": name,
+        "capacity": body.capacity,
+        "room_type": body.room_type,
+    }.items():
         setattr(room, k, v)
     db.commit(); db.refresh(room)
     return room
@@ -460,7 +511,8 @@ def update_room(room_id: int, body: RoomCreate, db: Session = Depends(get_db)):
 def delete_room(room_id: int, db: Session = Depends(get_db)):
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
-        raise HTTPException(404, "Room not found")
+        raise HTTPException(404)
+    _ensure_no_slot_usage(db, "room", room_id=room_id)
     db.delete(room); db.commit()
     return {"ok": True}
 
@@ -471,9 +523,24 @@ def delete_room(room_id: int, db: Session = Depends(get_db)):
 
 @app.post("/faculty", response_model=FacultyOut)
 def create_faculty(body: FacultyCreate, db: Session = Depends(get_db)):
-    require_institution(body.institution_id, db)
+    inst = _get_institution(db, body.institution_id)
+    name = _normalize_name(body.name)
+    if not name:
+        raise _bad_request("Faculty name is required")
+    email = body.email.strip()
+    if email:
+        duplicate_email = db.query(Faculty).filter(
+            Faculty.institution_id == inst.id,
+            Faculty.email == email,
+        ).first()
+        if duplicate_email:
+            raise _bad_request("A faculty member with this email already exists in the institution")
+    subjects = sorted({_normalize_name(subject) for subject in body.subjects if _normalize_name(subject)})
     data = body.model_dump()
-    data["unavailable_slots"] = [s.model_dump() for s in body.unavailable_slots]
+    data["name"] = name
+    data["email"] = email
+    data["subjects"] = subjects
+    data["unavailable_slots"] = _validate_unavailable_slots(inst, [s.model_dump() for s in body.unavailable_slots])
     fac = Faculty(**data)
     db.add(fac); db.commit(); db.refresh(fac)
     return fac
@@ -488,10 +555,27 @@ def list_faculty(institution_id: int = Query(...), db: Session = Depends(get_db)
 def update_faculty(fac_id: int, body: FacultyCreate, db: Session = Depends(get_db)):
     fac = db.query(Faculty).filter(Faculty.id == fac_id).first()
     if not fac:
-        raise HTTPException(404, "Faculty not found")
-    require_institution(body.institution_id, db)
+        raise HTTPException(404)
+    if body.institution_id != fac.institution_id:
+        raise _bad_request("Changing a faculty member's institution is not supported")
+    inst = _get_institution(db, body.institution_id)
+    name = _normalize_name(body.name)
+    if not name:
+        raise _bad_request("Faculty name is required")
+    email = body.email.strip()
+    if email:
+        duplicate_email = db.query(Faculty).filter(
+            Faculty.institution_id == inst.id,
+            Faculty.email == email,
+            Faculty.id != fac_id,
+        ).first()
+        if duplicate_email:
+            raise _bad_request("A faculty member with this email already exists in the institution")
     data = body.model_dump()
-    data["unavailable_slots"] = [s.model_dump() for s in body.unavailable_slots]
+    data["name"] = name
+    data["email"] = email
+    data["subjects"] = sorted({_normalize_name(subject) for subject in body.subjects if _normalize_name(subject)})
+    data["unavailable_slots"] = _validate_unavailable_slots(inst, [s.model_dump() for s in body.unavailable_slots])
     for k, v in data.items():
         setattr(fac, k, v)
     db.commit(); db.refresh(fac)
@@ -502,7 +586,10 @@ def update_faculty(fac_id: int, body: FacultyCreate, db: Session = Depends(get_d
 def delete_faculty(fac_id: int, db: Session = Depends(get_db)):
     fac = db.query(Faculty).filter(Faculty.id == fac_id).first()
     if not fac:
-        raise HTTPException(404, "Faculty not found")
+        raise HTTPException(404)
+    _ensure_no_slot_usage(db, "faculty", faculty_id=fac_id)
+    db.query(SectionCourse).filter(SectionCourse.faculty_id == fac_id).delete(synchronize_session=False)
+    db.query(CombinedGroup).filter(CombinedGroup.faculty_id == fac_id).delete(synchronize_session=False)
     db.delete(fac); db.commit()
     return {"ok": True}
 
@@ -513,8 +600,36 @@ def delete_faculty(fac_id: int, db: Session = Depends(get_db)):
 
 @app.post("/courses", response_model=CourseOut)
 def create_course(body: CourseCreate, db: Session = Depends(get_db)):
-    get_department(body.department_id, db)
-    course = Course(**body.model_dump())
+    dept = _get_department(db, body.department_id)
+    name = _normalize_name(body.name)
+    code = _normalize_name(body.code)
+    if not name:
+        raise _bad_request("Course name is required")
+    if body.practical_hours % 2 != 0:
+        raise _bad_request("practical_hours must be an even number because labs use 2-period blocks")
+    duplicate = db.query(Course).filter(
+        Course.department_id == dept.id,
+        Course.name == name,
+    ).first()
+    if duplicate:
+        raise _bad_request("A course with this name already exists in the department")
+    if code:
+        duplicate_code = db.query(Course).filter(
+            Course.department_id == dept.id,
+            Course.code == code,
+        ).first()
+        if duplicate_code:
+            raise _bad_request("A course with this code already exists in the department")
+    course = Course(
+        department_id=dept.id,
+        name=name,
+        code=code,
+        theory_hours=body.theory_hours,
+        practical_hours=body.practical_hours,
+        credit_hours=body.credit_hours,
+        is_core=body.is_core,
+        requires_lab=body.requires_lab or body.practical_hours > 0,
+    )
     db.add(course); db.commit(); db.refresh(course)
     return course
 
@@ -528,9 +643,41 @@ def list_courses(department_id: int = Query(...), db: Session = Depends(get_db))
 def update_course(course_id: int, body: CourseCreate, db: Session = Depends(get_db)):
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
-        raise HTTPException(404, "Course not found")
-    get_department(body.department_id, db)
-    for k, v in body.model_dump().items():
+        raise HTTPException(404)
+    if body.department_id != course.department_id:
+        raise _bad_request("Changing a course's department is not supported")
+    dept = _get_department(db, body.department_id)
+    name = _normalize_name(body.name)
+    code = _normalize_name(body.code)
+    if not name:
+        raise _bad_request("Course name is required")
+    if body.practical_hours % 2 != 0:
+        raise _bad_request("practical_hours must be an even number because labs use 2-period blocks")
+    duplicate = db.query(Course).filter(
+        Course.department_id == dept.id,
+        Course.name == name,
+        Course.id != course_id,
+    ).first()
+    if duplicate:
+        raise _bad_request("A course with this name already exists in the department")
+    if code:
+        duplicate_code = db.query(Course).filter(
+            Course.department_id == dept.id,
+            Course.code == code,
+            Course.id != course_id,
+        ).first()
+        if duplicate_code:
+            raise _bad_request("A course with this code already exists in the department")
+    for k, v in {
+        "department_id": dept.id,
+        "name": name,
+        "code": code,
+        "theory_hours": body.theory_hours,
+        "practical_hours": body.practical_hours,
+        "credit_hours": body.credit_hours,
+        "is_core": body.is_core,
+        "requires_lab": body.requires_lab or body.practical_hours > 0,
+    }.items():
         setattr(course, k, v)
     db.commit(); db.refresh(course)
     return course
@@ -540,7 +687,10 @@ def update_course(course_id: int, body: CourseCreate, db: Session = Depends(get_
 def delete_course(course_id: int, db: Session = Depends(get_db)):
     c = db.query(Course).filter(Course.id == course_id).first()
     if not c:
-        raise HTTPException(404, "Course not found")
+        raise HTTPException(404)
+    _ensure_no_slot_usage(db, "course", course_id=course_id)
+    db.query(SectionCourse).filter(SectionCourse.course_id == course_id).delete(synchronize_session=False)
+    db.query(CombinedGroup).filter(CombinedGroup.course_id == course_id).delete(synchronize_session=False)
     db.delete(c); db.commit()
     return {"ok": True}
 
@@ -551,8 +701,22 @@ def delete_course(course_id: int, db: Session = Depends(get_db)):
 
 @app.post("/sections", response_model=SectionOut)
 def create_section(body: SectionCreate, db: Session = Depends(get_db)):
-    get_department(body.department_id, db)
-    sec = Section(**body.model_dump())
+    dept = _get_department(db, body.department_id)
+    name = _normalize_name(body.name)
+    if not name:
+        raise _bad_request("Section name is required")
+    duplicate = db.query(Section).filter(
+        Section.department_id == dept.id,
+        Section.name == name,
+    ).first()
+    if duplicate:
+        raise _bad_request("A section with this name already exists in the department")
+    sec = Section(
+        department_id=dept.id,
+        name=name,
+        student_count=body.student_count,
+        semester=body.semester,
+    )
     db.add(sec); db.commit(); db.refresh(sec)
     return sec
 
@@ -562,11 +726,44 @@ def list_sections(department_id: int = Query(...), db: Session = Depends(get_db)
     return db.query(Section).filter(Section.department_id == department_id).all()
 
 
+@app.put("/sections/{section_id}", response_model=SectionOut)
+def update_section(section_id: int, body: SectionCreate, db: Session = Depends(get_db)):
+    section = _get_section(db, section_id)
+    if body.department_id != section.department_id:
+        raise _bad_request("Changing a section's department is not supported")
+    name = _normalize_name(body.name)
+    if not name:
+        raise _bad_request("Section name is required")
+    duplicate = db.query(Section).filter(
+        Section.department_id == section.department_id,
+        Section.name == name,
+        Section.id != section_id,
+    ).first()
+    if duplicate:
+        raise _bad_request("A section with this name already exists in the department")
+    section.name = name
+    section.student_count = body.student_count
+    section.semester = body.semester
+    db.commit(); db.refresh(section)
+    return section
+
+
 @app.delete("/sections/{section_id}")
 def delete_section(section_id: int, db: Session = Depends(get_db)):
     s = db.query(Section).filter(Section.id == section_id).first()
     if not s:
-        raise HTTPException(404, "Section not found")
+        raise HTTPException(404)
+    _ensure_no_slot_usage(db, "section", section_id=section_id)
+    db.query(SectionCourse).filter(SectionCourse.section_id == section_id).delete(synchronize_session=False)
+    groups = db.query(CombinedGroup).filter(CombinedGroup.institution_id == s.department.institution_id).all()
+    for group in groups:
+        if section_id not in (group.section_ids or []):
+            continue
+        remaining = [sid for sid in (group.section_ids or []) if sid != section_id]
+        if len(remaining) < 2:
+            db.delete(group)
+        else:
+            group.section_ids = remaining
     db.delete(s); db.commit()
     return {"ok": True}
 
@@ -577,7 +774,24 @@ def delete_section(section_id: int, db: Session = Depends(get_db)):
 
 @app.post("/section-courses", response_model=SectionCourseOut)
 def create_section_course(body: SectionCourseCreate, db: Session = Depends(get_db)):
-    _validate_section_course_payload(body, db)
+    section = _get_section(db, body.section_id)
+    course = _get_course(db, body.course_id)
+    faculty = _get_faculty(db, body.faculty_id)
+    if course.department_id != section.department_id:
+        raise _bad_request("Course and section must belong to the same department")
+    if faculty.institution_id != section.department.institution_id:
+        raise _bad_request("Faculty must belong to the same institution as the section")
+    duplicate = db.query(SectionCourse).filter(
+        SectionCourse.section_id == body.section_id,
+        SectionCourse.course_id == body.course_id,
+    ).first()
+    if duplicate:
+        raise _bad_request("This section already has an assignment for the selected course")
+    combined_conflict = db.query(CombinedGroup).filter(
+        CombinedGroup.course_id == body.course_id,
+    ).all()
+    if any(body.section_id in (group.section_ids or []) for group in combined_conflict):
+        raise _bad_request("This section/course is already covered by a combined group")
     sc = SectionCourse(**body.model_dump())
     db.add(sc); db.commit(); db.refresh(sc)
     return sc
@@ -592,7 +806,12 @@ def list_section_courses(section_id: int = Query(...), db: Session = Depends(get
 def delete_section_course(sc_id: int, db: Session = Depends(get_db)):
     sc = db.query(SectionCourse).filter(SectionCourse.id == sc_id).first()
     if not sc:
-        raise HTTPException(404, "Section-course assignment not found")
+        raise HTTPException(404)
+    if db.query(Slot).filter(
+        Slot.section_id == sc.section_id,
+        Slot.course_id == sc.course_id,
+    ).first():
+        raise _bad_request("Cannot delete an assignment that is already used in a timetable")
     db.delete(sc); db.commit()
     return {"ok": True}
 
@@ -603,8 +822,44 @@ def delete_section_course(sc_id: int, db: Session = Depends(get_db)):
 
 @app.post("/combined-groups", response_model=CombinedGroupOut)
 def create_combined_group(body: CombinedGroupCreate, db: Session = Depends(get_db)):
-    _validate_combined_group_payload(body, db)
-    cg = CombinedGroup(**body.model_dump())
+    inst = _get_institution(db, body.institution_id)
+    faculty = _get_faculty(db, body.faculty_id)
+    course = _get_course(db, body.course_id)
+    section_ids = sorted({int(section_id) for section_id in body.section_ids})
+    if len(section_ids) < 2:
+        raise _bad_request("Select at least two sections for a combined group")
+    sections = db.query(Section).filter(Section.id.in_(section_ids)).all()
+    if len(sections) != len(section_ids):
+        raise _bad_request("One or more selected sections do not exist")
+    if faculty.institution_id != inst.id:
+        raise _bad_request("Faculty must belong to the same institution")
+    if any(section.department.institution_id != inst.id for section in sections):
+        raise _bad_request("All sections must belong to the selected institution")
+    department_ids = {section.department_id for section in sections}
+    semester_ids = {section.semester for section in sections}
+    if len(department_ids) != 1:
+        raise _bad_request("Combined groups must use sections from the same department")
+    if len(semester_ids) != 1:
+        raise _bad_request("Combined groups must use sections from the same semester")
+    if course.department_id not in department_ids:
+        raise _bad_request("Combined group course must belong to the same department as the sections")
+    existing = db.query(CombinedGroup).filter(
+        CombinedGroup.institution_id == inst.id,
+        CombinedGroup.course_id == course.id,
+    ).all()
+    if any(sorted(group.section_ids or []) == section_ids for group in existing):
+        raise _bad_request("An identical combined group already exists")
+    if db.query(SectionCourse).filter(
+        SectionCourse.section_id.in_(section_ids),
+        SectionCourse.course_id == course.id,
+    ).first():
+        raise _bad_request("Remove individual section-course assignments before creating a combined group")
+    cg = CombinedGroup(
+        institution_id=inst.id,
+        section_ids=section_ids,
+        course_id=course.id,
+        faculty_id=faculty.id,
+    )
     db.add(cg); db.commit(); db.refresh(cg)
     return cg
 
@@ -620,14 +875,278 @@ def list_combined_groups(institution_id: int = Query(...), db: Session = Depends
 def delete_combined_group(cg_id: int, db: Session = Depends(get_db)):
     cg = db.query(CombinedGroup).filter(CombinedGroup.id == cg_id).first()
     if not cg:
-        raise HTTPException(404, "Combined group not found")
+        raise HTTPException(404)
+    combined_slots = db.query(Slot).join(Timetable).filter(
+        Timetable.institution_id == cg.institution_id,
+        Slot.course_id == cg.course_id,
+        Slot.is_combined == True,
+    ).all()
+    for slot in combined_slots:
+        if sorted(slot.section_ids or []) == sorted(cg.section_ids or []):
+            raise _bad_request("Cannot delete a combined group that is already used in a timetable")
     db.delete(cg); db.commit()
     return {"ok": True}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Timetable generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_solver_input(institution_id: int, db: Session, locked_slots=None, max_seconds=60):
+    """Assemble the full solver input dict from DB records."""
+    inst = db.query(Institution).filter(Institution.id == institution_id).first()
+    if not inst:
+        raise HTTPException(404, "Institution not found")
+
+    sections = db.query(Section).join(Department).filter(
+        Department.institution_id == institution_id
+    ).all()
+    section_ids = [s.id for s in sections]
+
+    courses_raw = db.query(Course).join(Department).filter(
+        Department.institution_id == institution_id
+    ).all()
+    faculty_raw = db.query(Faculty).filter(Faculty.institution_id == institution_id).all()
+    rooms_raw   = db.query(Room).filter(Room.institution_id == institution_id).all()
+    sc_raw      = db.query(SectionCourse).filter(
+        SectionCourse.section_id.in_(section_ids)
+    ).all()
+    cg_raw      = db.query(CombinedGroup).filter(
+        CombinedGroup.institution_id == institution_id
+    ).all()
+
+    return {
+        "institution": {
+            "working_days":            inst.working_days,
+            "periods_per_day":         inst.periods_per_day,
+            "break_slots":             inst.break_slots,
+            "period_duration_minutes": inst.period_duration_minutes,
+            "start_time":              inst.start_time,
+        },
+        "sections": [
+            {"id": s.id, "name": s.name, "student_count": s.student_count}
+            for s in sections
+        ],
+        "courses": [
+            {
+                "id": c.id, "name": c.name,
+                "theory_hours": c.theory_hours,
+                "practical_hours": c.practical_hours,
+                "is_core": c.is_core,
+                "requires_lab": c.requires_lab,
+            }
+            for c in courses_raw
+        ],
+        "faculty": [
+            {
+                "id": f.id, "name": f.name,
+                "unavailable_slots": f.unavailable_slots or [],
+                "max_consecutive_periods": f.max_consecutive_periods,
+            }
+            for f in faculty_raw
+        ],
+        "rooms": [
+            {"id": r.id, "name": r.name, "capacity": r.capacity, "room_type": r.room_type}
+            for r in rooms_raw
+        ],
+        "section_courses": [
+            {"section_id": sc.section_id, "course_id": sc.course_id, "faculty_id": sc.faculty_id}
+            for sc in sc_raw
+        ],
+        "combined_groups": [
+            {"id": cg.id, "section_ids": cg.section_ids, "course_id": cg.course_id, "faculty_id": cg.faculty_id}
+            for cg in cg_raw
+        ],
+        "locked_slots": locked_slots or [],
+        "max_solve_seconds": max_seconds,
+    }
+
+
+def _save_schedule(timetable_id: int, result: dict, db: Session, mark_modified_sessions=None):
+    """Persist solver output into Slot rows."""
+    mark_modified_sessions = mark_modified_sessions or set()
+    for entry in result.get("schedule", []):
+        slot = Slot(
+            timetable_id = timetable_id,
+            section_id   = entry.get("section_id"),
+            section_ids  = entry.get("section_ids", []),
+            course_id    = entry["course_id"],
+            faculty_id   = entry["faculty_id"],
+            room_id      = entry.get("room_id"),
+            day          = entry["day"],
+            period       = entry["period"],
+            duration     = entry.get("duration", 1),
+            slot_type    = entry.get("slot_type", "theory"),
+            is_combined  = entry.get("is_combined", False),
+            is_modified  = entry.get("session_id") in mark_modified_sessions,
+        )
+        db.add(slot)
+
+    for conflict in result.get("conflicts", []):
+        v = ConstraintViolation(
+            timetable_id   = timetable_id,
+            constraint_type= conflict.get("type", "unknown"),
+            description    = conflict.get("description", ""),
+            severity       = conflict.get("severity", "hard"),
+        )
+        db.add(v)
+
+    db.commit()
+
+
+def _enrich_slots(slots, db: Session) -> List[dict]:
+    """Add human-readable names to slot dicts for the frontend."""
+    result = []
+    for sl in slots:
+        d = {c.name: getattr(sl, c.name) for c in sl.__table__.columns}
+        if sl.slot_type == "break":
+            d["course_name"] = "Break Lecture"
+            d["faculty_name"] = "No substitute available"
+            d["room_name"] = "Free period"
+        else:
+            d["course_name"]  = sl.course.name  if sl.course  else ""
+            d["faculty_name"] = sl.faculty.name if sl.faculty else ""
+            d["room_name"]    = sl.room.name    if sl.room     else "TBD"
+        d["section_name"] = sl.section.name if sl.section else ""
+        result.append(d)
+    return result
+
+
+def _slot_occupied_periods(slot: Slot, periods_per_day: Dict[Any, List[int]]) -> List[int]:
+    """Return all period indexes occupied by a slot, including multi-period labs."""
+    day_periods = periods_per_day.get(str(slot.day), periods_per_day.get(slot.day, [])) or []
+    ordered_periods = sorted(int(p) for p in day_periods)
+    duration = max(int(slot.duration or 1), 1)
+
+    if slot.period not in ordered_periods:
+        return [slot.period]
+
+    start_idx = ordered_periods.index(slot.period)
+    return ordered_periods[start_idx:start_idx + duration]
+
+
+def _faculty_subject_match(course: Optional[Course], faculty: Faculty) -> bool:
+    if not course:
+        return False
+
+    course_name = (course.name or "").strip().lower()
+    if not course_name:
+        return False
+
+    for subject in faculty.subjects or []:
+        normalized = (subject or "").strip().lower()
+        if normalized and (course_name in normalized or normalized in course_name):
+            return True
+    return False
+
+
+def _find_available_substitutes(
+    slot: Slot,
+    timetable: Timetable,
+    db: Session,
+    exclude_faculty_ids: Optional[set[int]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Find substitute faculty ordered by suitability.
+    Preference order:
+    1. Subject match
+    2. Lower existing weekly teaching load
+    3. Faculty name
+    """
+    exclude_faculty_ids = exclude_faculty_ids or set()
+    occupied_periods = set(_slot_occupied_periods(slot, timetable.institution.periods_per_day or {}))
+    course = db.query(Course).filter(Course.id == slot.course_id).first() if slot.course_id else None
+
+    timetable_slots = db.query(Slot).filter(
+        Slot.timetable_id == timetable.id,
+        Slot.id != slot.id,
+    ).all()
+
+    all_faculty = db.query(Faculty).filter(
+        Faculty.institution_id == timetable.institution_id
+    ).all()
+
+    candidates: List[Dict[str, Any]] = []
+    for fac in all_faculty:
+        if fac.id in exclude_faculty_ids or fac.id == slot.faculty_id:
+            continue
+
+        unavailable = {
+            (int(u["day"]), int(u["period"]))
+            for u in (fac.unavailable_slots or [])
+        }
+        if any((slot.day, period) in unavailable for period in occupied_periods):
+            continue
+
+        busy = False
+        weekly_load = 0
+        for existing in timetable_slots:
+            if existing.faculty_id != fac.id or existing.slot_type == "break":
+                continue
+
+            weekly_load += existing.duration or 1
+            if existing.day != slot.day:
+                continue
+
+            existing_periods = set(
+                _slot_occupied_periods(existing, timetable.institution.periods_per_day or {})
+            )
+            if occupied_periods & existing_periods:
+                busy = True
+                break
+
+        if busy:
+            continue
+
+        subject_match = _faculty_subject_match(course, fac)
+        candidates.append({
+            "faculty_id": fac.id,
+            "faculty_name": fac.name,
+            "subject_match": subject_match,
+            "hours_per_week": weekly_load,
+            "score": 100 if subject_match else 50,
+        })
+
+    candidates.sort(
+        key=lambda item: (
+            -item["score"],
+            item["hours_per_week"],
+            item["faculty_name"].lower(),
+        )
+    )
+    return candidates
+
+
+def _copy_slot_to_timetable(
+    source: Slot,
+    timetable_id: int,
+    *,
+    faculty_id: Any = _UNSET,
+    room_id: Any = _UNSET,
+    slot_type: Optional[str] = None,
+    is_modified: Optional[bool] = None,
+) -> Slot:
+    return Slot(
+        timetable_id=timetable_id,
+        section_id=source.section_id,
+        section_ids=source.section_ids,
+        course_id=source.course_id,
+        faculty_id=source.faculty_id if faculty_id is _UNSET else faculty_id,
+        room_id=source.room_id if room_id is _UNSET else room_id,
+        day=source.day,
+        period=source.period,
+        duration=source.duration,
+        slot_type=source.slot_type if slot_type is None else slot_type,
+        is_locked=source.is_locked,
+        is_combined=source.is_combined,
+        is_modified=source.is_modified if is_modified is None else is_modified,
+    )
+
+
 @app.post("/timetables/generate")
 def generate_timetable(body: GenerateRequest, db: Session = Depends(get_db)):
-    solver_input = _build_solver_input_payload(
+    _validate_generation_readiness(body.institution_id, db)
+    solver_input = _build_solver_input(
         body.institution_id, db,
         locked_slots=body.locked_slots,
         max_seconds=body.max_solve_seconds,
@@ -638,7 +1157,7 @@ def generate_timetable(body: GenerateRequest, db: Session = Depends(get_db)):
     status = result.get("status", "error")
     tt = Timetable(
         institution_id = body.institution_id,
-        name           = body.name,
+        name           = _normalize_name(body.name) or "Semester Timetable",
         semester       = body.semester,
         status         = "done" if status in ("optimal", "feasible") else status,
         solve_time     = result.get("solve_time", 0),
@@ -646,20 +1165,14 @@ def generate_timetable(body: GenerateRequest, db: Session = Depends(get_db)):
     db.add(tt); db.commit(); db.refresh(tt)
 
     _save_schedule(tt.id, result, db)
-    conflicts = _serialize_conflicts(result.get("conflicts", []))
-    recovery_suggestions = build_recovery_suggestions(conflicts)
 
     return {
         "timetable_id":  tt.id,
         "status":        tt.status,
         "solve_time":    tt.solve_time,
         "num_slots":     len(result.get("schedule", [])),
-        "conflicts":     conflicts,
+        "conflicts":     result.get("conflicts", []),
         "objective":     result.get("objective", 0),
-        "warnings":      result.get("warnings", []),
-        "diagnostics":   result.get("diagnostics", conflicts),
-        "unassigned_slots": result.get("unassigned_slots", []),
-        "recovery_suggestions": recovery_suggestions,
     }
 
 
@@ -716,13 +1229,89 @@ def delete_timetable(tt_id: int, db: Session = Depends(get_db)):
 def what_if(body: WhatIfRequest, db: Session = Depends(get_db)):
     """
     Mark a faculty as absent for given days.
-    Lock all unaffected slots, re-solve only the disrupted ones.
-    Returns a new timetable with is_modified=True on changed slots.
+    Prefer an available substitute for each affected slot.
+    If nobody is free, convert that lecture into a student break.
     """
+    t0 = time.time()
     tt = db.query(Timetable).filter(Timetable.id == body.timetable_id).first()
     if not tt:
         raise HTTPException(404, "Timetable not found")
-    return _apply_what_if(tt, body.absent_faculty_id, body.affected_days, db)
+
+    # Slots NOT belonging to absent faculty → lock them
+    absent_faculty = db.query(Faculty).filter(
+        Faculty.id == body.absent_faculty_id,
+        Faculty.institution_id == tt.institution_id,
+    ).first()
+    if not absent_faculty:
+        raise HTTPException(404, "Faculty not found in this institution")
+
+    new_tt = Timetable(
+        institution_id = tt.institution_id,
+        name           = f"{tt.name} (What-If)",
+        semester       = tt.semester,
+        status         = "done",
+        solve_time     = 0,
+    )
+    db.add(new_tt); db.commit(); db.refresh(new_tt)
+
+    affected_days = set(body.affected_days or (tt.institution.working_days or []))
+    substituted_count = 0
+    break_count = 0
+
+    for slot in tt.slots:
+        is_affected = (
+            slot.faculty_id == body.absent_faculty_id
+            and slot.day in affected_days
+            and slot.slot_type != "break"
+        )
+
+        if not is_affected:
+            db.add(_copy_slot_to_timetable(slot, new_tt.id, is_modified=False))
+            continue
+
+        candidates = _find_available_substitutes(
+            slot,
+            tt,
+            db,
+            exclude_faculty_ids={body.absent_faculty_id},
+        )
+
+        if candidates:
+            substituted_count += 1
+            db.add(_copy_slot_to_timetable(
+                slot,
+                new_tt.id,
+                faculty_id=candidates[0]["faculty_id"],
+                is_modified=True,
+            ))
+        else:
+            break_count += 1
+            db.add(_copy_slot_to_timetable(
+                slot,
+                new_tt.id,
+                room_id=None,
+                slot_type="break",
+                is_modified=True,
+            ))
+
+    db.commit()
+    new_tt.solve_time = round(time.time() - t0, 3)
+    db.commit()
+
+    enriched = _enrich_slots(
+        db.query(Slot).filter(Slot.timetable_id == new_tt.id).all(), db
+    )
+    return {
+        "timetable_id":    new_tt.id,
+        "status":          new_tt.status,
+        "solve_time":      new_tt.solve_time,
+        "slots":           enriched,
+        "modified_count":  substituted_count + break_count,
+        "substituted_count": substituted_count,
+        "break_count":     break_count,
+        "conflicts":       [],
+    }
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -733,7 +1322,7 @@ def what_if(body: WhatIfRequest, db: Session = Depends(get_db)):
 def lock_slot(slot_id: int, db: Session = Depends(get_db)):
     sl = db.query(Slot).filter(Slot.id == slot_id).first()
     if not sl:
-        raise HTTPException(404, "Slot not found")
+        raise HTTPException(404)
     sl.is_locked = not sl.is_locked
     db.commit()
     return {"slot_id": slot_id, "is_locked": sl.is_locked}
@@ -743,30 +1332,23 @@ def lock_slot(slot_id: int, db: Session = Depends(get_db)):
 def substitute_faculty(slot_id: int, body: SubstituteRequest, db: Session = Depends(get_db)):
     sl = db.query(Slot).filter(Slot.id == slot_id).first()
     if not sl:
-        raise HTTPException(404, "Slot not found")
+        raise HTTPException(404)
     new_fac = db.query(Faculty).filter(Faculty.id == body.substitute_faculty_id).first()
     if not new_fac:
         raise HTTPException(404, "Substitute faculty not found")
-    if new_fac.institution_id != sl.timetable.institution_id:
-        raise bad_request("Substitute faculty must belong to the same institution")
+    if not sl.timetable or new_fac.institution_id != sl.timetable.institution_id:
+        raise HTTPException(400, "Substitute faculty must belong to the same institution")
 
-    periods_per_day = normalize_period_map(sl.timetable.institution.periods_per_day or {})
-    target_periods = set(occupied_periods(sl.day, sl.period, sl.duration, periods_per_day))
-    sibling_slots = db.query(Slot).filter(
-        Slot.timetable_id == sl.timetable_id,
-        Slot.id != sl.id,
-        Slot.day == sl.day,
-        Slot.faculty_id == body.substitute_faculty_id,
-    ).all()
-    for sibling in sibling_slots:
-        sibling_periods = set(occupied_periods(sibling.day, sibling.period, sibling.duration, periods_per_day))
-        if target_periods & sibling_periods:
-            raise bad_request("Substitute faculty is already busy during that slot")
-    for blocked in new_fac.unavailable_slots or []:
-        if int(blocked["day"]) == sl.day and int(blocked["period"]) in target_periods:
-            raise bad_request("Substitute faculty is unavailable during that slot")
+    candidate_ids = {
+        c["faculty_id"]
+        for c in _find_available_substitutes(sl, sl.timetable, db)
+    }
+    if body.substitute_faculty_id not in candidate_ids:
+        raise HTTPException(400, "Selected faculty is not available for this slot")
 
     sl.faculty_id  = body.substitute_faculty_id
+    if sl.slot_type == "break":
+        sl.slot_type = "lab" if (sl.duration or 1) > 1 else "theory"
     sl.is_modified = True
     db.commit()
     return {"ok": True, "new_faculty": new_fac.name}
@@ -777,128 +1359,10 @@ def find_substitutes(tt_id: int, slot_id: int = Query(...), db: Session = Depend
     """Find available substitute faculty for a given slot."""
     slot = db.query(Slot).filter(Slot.id == slot_id, Slot.timetable_id == tt_id).first()
     if not slot:
-        raise HTTPException(404, "Slot not found")
+        raise HTTPException(404)
 
-    tt   = db.query(Timetable).filter(Timetable.id == tt_id).first()
-    if not tt:
-        raise HTTPException(404, "Timetable not found")
-    inst = tt.institution_id
-    all_fac = db.query(Faculty).filter(Faculty.institution_id == inst).all()
-    periods_per_day = normalize_period_map(tt.institution.periods_per_day or {})
-    target_periods = set(occupied_periods(slot.day, slot.period, slot.duration, periods_per_day))
-    schedule_slots = db.query(Slot).filter(Slot.timetable_id == tt_id, Slot.day == slot.day).all()
-    course = db.query(Course).filter(Course.id == slot.course_id).first()
-    subject_name = course.name if course else ""
-    current_section = slot.section or (db.query(Section).filter(Section.id == slot.section_id).first() if slot.section_id else None)
-    target_department_id = current_section.department_id if current_section else None
-
-    faculty_load = {}
-    for faculty_member in all_fac:
-        total = 0
-        member_slots = db.query(Slot).filter(Slot.timetable_id == tt_id, Slot.faculty_id == faculty_member.id).all()
-        for scheduled_slot in member_slots:
-            total += len(occupied_periods(scheduled_slot.day, scheduled_slot.period, scheduled_slot.duration, periods_per_day))
-        faculty_load[faculty_member.id] = total
-
-    faculty_department_ids: Dict[int, set] = {}
-    for assignment in db.query(SectionCourse).join(Section).filter(SectionCourse.faculty_id.in_([fac.id for fac in all_fac])).all():
-        section = db.query(Section).filter(Section.id == assignment.section_id).first()
-        if section:
-            faculty_department_ids.setdefault(assignment.faculty_id, set()).add(section.department_id)
-
-    candidates = []
-    blocked_reasons = []
-    for fac in all_fac:
-        reasons = []
-        blocked = []
-        if fac.id == slot.faculty_id:
-            blocked.append("Already assigned to this slot")
-
-        overlaps = False
-        for scheduled_slot in schedule_slots:
-            if scheduled_slot.id == slot.id or scheduled_slot.faculty_id != fac.id:
-                continue
-            scheduled_periods = set(occupied_periods(scheduled_slot.day, scheduled_slot.period, scheduled_slot.duration, periods_per_day))
-            if target_periods & scheduled_periods:
-                overlaps = True
-                break
-        if overlaps:
-            blocked.append("Already teaching during one of the occupied periods")
-
-        unavail = fac.unavailable_slots or []
-        if any(int(unavailable["day"]) == slot.day and int(unavailable["period"]) in target_periods for unavailable in unavail):
-            blocked.append("Marked unavailable for this time")
-
-        subject_match = any(subject_name.lower() in s.lower() for s in (fac.subjects or []))
-        same_department = target_department_id in faculty_department_ids.get(fac.id, set()) if target_department_id is not None else False
-        score = 0
-        if subject_match:
-            score += 10
-            reasons.append("Teaches the same or a matching subject")
-        if same_department:
-            score += 4
-            reasons.append("Already teaches in the same department")
-        load_penalty = faculty_load.get(fac.id, 0)
-        score += max(0, 8 - min(load_penalty, 8))
-        reasons.append(f"Current weekly load is {faculty_load.get(fac.id, 0)} periods")
-
-        day_slots = sorted(
-            occupied
-            for scheduled_slot in db.query(Slot).filter(
-                Slot.timetable_id == tt_id,
-                Slot.faculty_id == fac.id,
-                Slot.day == slot.day,
-            ).all()
-            for occupied in occupied_periods(scheduled_slot.day, scheduled_slot.period, scheduled_slot.duration, periods_per_day)
-        )
-        future_chain = sorted(set(day_slots) | target_periods)
-        longest_run = 0
-        current_run = 0
-        prev_period = None
-        for period in future_chain:
-            if prev_period is None or period == prev_period + 1:
-                current_run += 1
-            else:
-                current_run = 1
-            prev_period = period
-            longest_run = max(longest_run, current_run)
-        if longest_run > fac.max_consecutive_periods:
-            blocked.append(
-                f"Would exceed max consecutive periods ({fac.max_consecutive_periods})"
-            )
-        elif longest_run == fac.max_consecutive_periods:
-            reasons.append("Fits but reaches the faculty's consecutive-period limit")
-        else:
-            score += 3
-            reasons.append("Keeps consecutive teaching within preference")
-
-        if blocked:
-            blocked_reasons.append(
-                {
-                    "faculty_id": fac.id,
-                    "faculty_name": fac.name,
-                    "blocked_reasons": blocked,
-                }
-            )
-            continue
-
-        candidates.append(
-            {
-                "faculty_id": fac.id,
-                "faculty_name": fac.name,
-                "subject_match": subject_match,
-                "same_department": same_department,
-                "score": score,
-                "candidate_reasons": reasons,
-            }
-        )
-
-    candidates.sort(key=lambda item: (-item["score"], item["faculty_name"]))
-    return {
-        "candidates": candidates[:5],
-        "candidate_reasons": {candidate["faculty_id"]: candidate["candidate_reasons"] for candidate in candidates[:5]},
-        "blocked_reasons": blocked_reasons,
-    }
+    tt = db.query(Timetable).filter(Timetable.id == tt_id).first()
+    return _find_available_substitutes(slot, tt, db)[:5]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -909,8 +1373,97 @@ def find_substitutes(tt_id: int, slot_id: int = Query(...), db: Session = Depend
 def get_analytics(tt_id: int, db: Session = Depends(get_db)):
     tt = db.query(Timetable).filter(Timetable.id == tt_id).first()
     if not tt:
-        raise HTTPException(404, "Timetable not found")
-    return build_analytics(tt.slots, tt.institution, db, total_conflicts=len(tt.violations))
+        raise HTTPException(404)
+
+    slots = tt.slots
+    inst  = tt.institution
+    working_days = inst.working_days
+    ppd = inst.periods_per_day or {}
+    all_periods  = sorted({p for ps in ppd.values() for p in (ps or [])})
+    total_slots  = len(working_days) * max(len(all_periods), 1)
+
+    # Faculty load
+    faculty_hours: Dict[int, int] = {}
+    for sl in slots:
+        if sl.slot_type == "break" or not sl.faculty_id:
+            continue
+        faculty_hours[sl.faculty_id] = faculty_hours.get(sl.faculty_id, 0) + sl.duration
+    fac_load = []
+    for f_id, hrs in faculty_hours.items():
+        fac = db.query(Faculty).filter(Faculty.id == f_id).first()
+        fac_load.append({
+            "faculty_id": f_id,
+            "faculty_name": fac.name if fac else str(f_id),
+            "hours_per_week": hrs,
+            "wellbeing_score": min(100, max(0, 100 - abs(hrs - 18) * 3)),
+        })
+    fac_load.sort(key=lambda x: -x["hours_per_week"])
+
+    # Room utilization
+    room_usage: Dict[int, int] = {}
+    for sl in slots:
+        if sl.room_id:
+            room_usage[sl.room_id] = room_usage.get(sl.room_id, 0) + sl.duration
+    rooms_db = db.query(Room).filter(Room.institution_id == inst.id).all()
+    room_util = []
+    for r in rooms_db:
+        used = room_usage.get(r.id, 0)
+        room_util.append({
+            "room_id":     r.id,
+            "room_name":   r.name,
+            "room_type":   r.room_type,
+            "used_periods": used,
+            "total_periods": total_slots,
+            "utilization_pct": round(used / max(total_slots, 1) * 100, 1),
+        })
+
+    # Section gaps (free periods between first and last class per day)
+    section_gaps: Dict[int, int] = {}
+    for sl in slots:
+        s_id = sl.section_id
+        if s_id:
+            section_gaps[s_id] = section_gaps.get(s_id, 0)  # placeholder
+
+    DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    sections_db = db.query(Section).join(Department).filter(
+        Department.institution_id == inst.id
+    ).all()
+    sec_gaps_list = []
+    for sec in sections_db:
+        sec_slots = [sl for sl in slots if sl.section_id == sec.id and sl.slot_type != "break"]
+        gaps = 0
+        for d in working_days:
+            day_periods = sorted({sl.period for sl in sec_slots if sl.day == d})
+            if len(day_periods) >= 2:
+                gaps += day_periods[-1] - day_periods[0] - len(day_periods) + 1
+        sec_gaps_list.append({"section_id": sec.id, "section_name": sec.name, "total_gaps": gaps})
+
+    # Core subject distribution
+    core_in_morning = 0
+    core_total = 0
+    for sl in slots:
+        if sl.slot_type == "break" or not sl.course_id:
+            continue
+        c = db.query(Course).filter(Course.id == sl.course_id).first()
+        if c and c.is_core:
+            core_total += 1
+            if sl.period < 2:
+                core_in_morning += 1
+    core_dist = {
+        "core_total": core_total,
+        "core_in_morning": core_in_morning,
+        "morning_pct": round(core_in_morning / max(core_total, 1) * 100, 1),
+    }
+
+    return {
+        "faculty_load":             fac_load,
+        "room_utilization":         room_util,
+        "section_gaps":             sec_gaps_list,
+        "core_subject_distribution": core_dist,
+        "wellbeing_scores":         [{"faculty_id": f["faculty_id"], "faculty_name": f["faculty_name"], "score": f["wellbeing_score"]} for f in fac_load],
+        "total_slots":              len(slots),
+        "total_conflicts":          len(tt.violations),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -918,116 +1471,14 @@ def get_analytics(tt_id: int, db: Session = Depends(get_db)):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/nlp/parse-constraint")
-async def parse_constraint(body: NLPConstraintRequest):
-    result = await parse_nlp_constraint(body.text, settings.ANTHROPIC_API_KEY)
+async def parse_constraint(body: NLPConstraintRequest, db: Session = Depends(get_db)):
+    context = _build_nlp_context(body.institution_id, db)
+    result = await parse_nlp_constraint(body.text, settings.ANTHROPIC_API_KEY, context)
     return {
         "original_text": body.text,
         "parsed":        result,
         "confidence":    result.get("confidence", 0.5),
         "description":   result.get("description", "Constraint parsed"),
-    }
-
-
-@app.post("/nlp/execute")
-async def execute_nlp_command(body: NLPExecuteRequest, db: Session = Depends(get_db)):
-    require_institution(body.institution_id, db)
-    parsed = await parse_nlp_constraint(body.text, settings.ANTHROPIC_API_KEY)
-    action_type = parsed.get("action_type") or parsed.get("type") or "constraint"
-
-    if action_type in {"faculty_absence", "cancel_session", "reschedule_request"}:
-        faculty = _resolve_faculty_by_name(body.institution_id, parsed.get("faculty_name"), db)
-        timetable = db.query(Timetable).filter(
-            Timetable.id == body.timetable_id
-        ).first() if body.timetable_id else _latest_done_timetable(body.institution_id, db)
-        if not timetable:
-            raise bad_request("No timetable was available for execution")
-        result = _apply_what_if(timetable, faculty.id, parsed.get("affected_days") or [], db)
-        return {
-            "original_text": body.text,
-            "parsed": parsed,
-            "action_type": action_type,
-            "executed": True,
-            "description": parsed.get("description", "Action executed"),
-            "result": {
-                "mode": "what_if",
-                "faculty_id": faculty.id,
-                "faculty_name": faculty.name,
-                **result,
-            },
-        }
-
-    if action_type == "update_faculty_availability":
-        faculty = _resolve_faculty_by_name(body.institution_id, parsed.get("faculty_name"), db)
-        day = parsed.get("day")
-        period = parsed.get("period")
-        if day is None:
-            raise bad_request("Please specify a day for availability updates")
-        new_slot = {"day": int(day), "period": int(period) if period is not None else 0}
-        existing = faculty.unavailable_slots or []
-        if new_slot not in existing:
-            existing.append(new_slot)
-            faculty.unavailable_slots = existing
-            db.commit()
-        return {
-            "original_text": body.text,
-            "parsed": parsed,
-            "action_type": action_type,
-            "executed": True,
-            "description": parsed.get("description", "Faculty availability updated"),
-            "result": {
-                "mode": "faculty_update",
-                "faculty_id": faculty.id,
-                "faculty_name": faculty.name,
-                "unavailable_slots": faculty.unavailable_slots,
-            },
-        }
-
-    if action_type == "update_faculty_max_consecutive":
-        faculty = _resolve_faculty_by_name(body.institution_id, parsed.get("faculty_name"), db)
-        max_periods = parsed.get("max_periods")
-        if not max_periods:
-            raise bad_request("Could not determine the max consecutive periods")
-        faculty.max_consecutive_periods = int(max_periods)
-        db.commit()
-        return {
-            "original_text": body.text,
-            "parsed": parsed,
-            "action_type": action_type,
-            "executed": True,
-            "description": parsed.get("description", "Faculty max consecutive periods updated"),
-            "result": {
-                "mode": "faculty_update",
-                "faculty_id": faculty.id,
-                "faculty_name": faculty.name,
-                "max_consecutive_periods": faculty.max_consecutive_periods,
-            },
-        }
-
-    if action_type == "mark_course_priority":
-        course = _resolve_course_by_name(body.institution_id, parsed.get("course_name"), db)
-        course.is_core = True
-        db.commit()
-        return {
-            "original_text": body.text,
-            "parsed": parsed,
-            "action_type": action_type,
-            "executed": True,
-            "description": parsed.get("description", "Course priority updated"),
-            "result": {
-                "mode": "course_update",
-                "course_id": course.id,
-                "course_name": course.name,
-                "is_core": course.is_core,
-            },
-        }
-
-    return {
-        "original_text": body.text,
-        "parsed": parsed,
-        "action_type": action_type,
-        "executed": False,
-        "description": "Parsed successfully, but no executable action was recognized",
-        "result": {},
     }
 
 

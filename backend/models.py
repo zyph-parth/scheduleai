@@ -146,7 +146,7 @@ class Slot(Base):
     day = Column(Integer, nullable=False)             # 0=Mon..5=Sat
     period = Column(Integer, nullable=False)          # period index
     duration = Column(Integer, default=1)             # 1=theory, 2=lab
-    slot_type = Column(String, default="theory")      # theory | lab
+    slot_type = Column(String, default="theory")      # theory | lab | break
     is_locked = Column(Boolean, default=False)
     is_combined = Column(Boolean, default=False)
     is_modified = Column(Boolean, default=False)      # highlighted in what-if

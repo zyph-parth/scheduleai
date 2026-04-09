@@ -44,7 +44,9 @@ export default function WhatIf() {
       toast.dismiss(t)
       setResult(res)
       if (res.status === 'done' || res.status === 'optimal' || res.status === 'feasible') {
-        toast.success(`Done! ${res.modified_count} slot(s) rescheduled in ${res.solve_time}s`)
+        toast.success(
+          `Done! ${res.substituted_count ?? 0} substitute(s), ${res.break_count ?? 0} break(s) in ${res.solve_time}s`
+        )
       } else {
         toast.error(`Status: ${res.status}`)
       }
@@ -68,7 +70,7 @@ export default function WhatIf() {
           <Zap className="w-6 h-6 text-amber-400" /> What-If Analysis
         </h1>
         <p className="text-slate-400 text-sm mt-0.5">
-          Simulate faculty absence and instantly regenerate only the affected slots
+          Simulate faculty absence, assign substitutes when available, and turn uncovered classes into breaks
         </p>
       </div>
 
@@ -164,6 +166,9 @@ export default function WhatIf() {
               <span className="badge-amber">
                 <Diff className="w-3 h-3" />
                 {result.modified_count} slot(s) changed
+              </span>
+              <span className="badge">
+                {result.substituted_count ?? 0} substitutes, {result.break_count ?? 0} breaks
               </span>
             </div>
           )}

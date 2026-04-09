@@ -8,6 +8,7 @@ const DAY_LABELS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday
 const TYPE_COLOUR: Record<string, string> = {
   theory: 'bg-brand-600/80',
   lab:    'bg-emerald-600/80',
+  break:  'bg-amber-500/80',
 }
 
 export default function StudentView() {
