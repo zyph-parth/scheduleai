@@ -33,11 +33,14 @@ from schemas import (
     CombinedGroupCreate, CombinedGroupOut,
     GenerateRequest, WhatIfRequest, SubstituteRequest,
     NLPConstraintRequest, NLPConstraintResponse,
+    WhatsAppSendRequest, WhatsAppSendResponse,
+    WhatsAppSectionSendRequest, WhatsAppSectionSendResponse,
     SlotOut, TimetableOut, AnalyticsOut,
 )
 from solver.engine import solve_timetable
 from services.nlp_service import parse_nlp_constraint
 from services.export_service import export_excel, export_pdf
+from services.whatsapp_service import build_whatsapp_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1686,3 +1689,69 @@ def export_timetable_pdf(tt_id: int, db: Session = Depends(get_db)):
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="timetable_{tt_id}.pdf"'},
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WhatsApp (Twilio sandbox/testing)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.post("/notifications/whatsapp/send", response_model=WhatsAppSendResponse)
+def send_whatsapp_message(body: WhatsAppSendRequest):
+    service = build_whatsapp_service(
+        settings.TWILIO_ACCOUNT_SID,
+        settings.TWILIO_AUTH_TOKEN,
+        settings.TWILIO_WHATSAPP_FROM,
+    )
+    if not service:
+        raise HTTPException(
+            status_code=500,
+            detail="Twilio WhatsApp is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_WHATSAPP_FROM in backend/.env",
+        )
+    try:
+        sid = service.send_text(body.to_number, body.message.strip())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"WhatsApp send failed: {e}")
+    return {"ok": True, "sid": sid}
+
+
+@app.post("/notifications/whatsapp/send-to-sections", response_model=WhatsAppSectionSendResponse)
+def send_whatsapp_to_sections(body: WhatsAppSectionSendRequest, db: Session = Depends(get_db)):
+    service = build_whatsapp_service(
+        settings.TWILIO_ACCOUNT_SID,
+        settings.TWILIO_AUTH_TOKEN,
+        settings.TWILIO_WHATSAPP_FROM,
+    )
+    if not service:
+        raise HTTPException(
+            status_code=500,
+            detail="Twilio WhatsApp is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_WHATSAPP_FROM in backend/.env",
+        )
+
+    sections = db.query(Section).filter(Section.id.in_(body.section_ids)).all()
+    sections_by_id = {section.id: section for section in sections}
+    deliveries = []
+    skipped = []
+
+    for section_id in body.section_ids:
+        section = sections_by_id.get(section_id)
+        if not section:
+            skipped.append({"section_id": section_id, "section_name": f"Section {section_id}", "reason": "Section not found"})
+            continue
+        phone = (section.class_representative_phone or "").strip()
+        if not phone:
+            skipped.append({"section_id": section.id, "section_name": section.name, "reason": "Class representative WhatsApp number is missing"})
+            continue
+        try:
+            sid = service.send_text(phone, body.message.strip())
+            deliveries.append({"section_id": section.id, "section_name": section.name, "to_number": phone, "sid": sid})
+        except Exception as e:
+            skipped.append({"section_id": section.id, "section_name": section.name, "reason": str(e)})
+
+    return {
+        "ok": True,
+        "sent_count": len(deliveries),
+        "skipped_count": len(skipped),
+        "deliveries": deliveries,
+        "skipped": skipped,
+    }

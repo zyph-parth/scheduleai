@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { API } from '../api/client'
+import { API, getErrorMessage } from '../api/client'
 import toast from 'react-hot-toast'
 import {
   Zap, User, CalendarX, ArrowRight, CheckCircle2,
-  AlertTriangle, Diff, Clock
+  AlertTriangle, Diff, Clock, MessageCircle
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -18,7 +18,9 @@ export default function WhatIf() {
   const [selFac,       setSelFac]       = useState<number | null>(null)
   const [selDays,      setSelDays]      = useState<number[]>([])
   const [loading,      setLoading]      = useState(false)
+  const [sending,      setSending]      = useState(false)
   const [result,       setResult]       = useState<any>(null)
+  const [crNumber,     setCrNumber]     = useState('')
 
   useEffect(() => { API.getInstitutions().then(d => { setInstitutions(d); if (d.length) setSelInst(d[0].id) }) }, [])
   useEffect(() => {
@@ -61,6 +63,53 @@ export default function WhatIf() {
   const modifiedSlots = (result?.slots || []).filter((s: any) => s.is_modified)
   const stableSlots   = (result?.slots || []).filter((s: any) => !s.is_modified)
   const selectedFac   = faculty.find(f => f.id === selFac)
+  const selectedTt    = timetables.find(t => t.id === selTtId)
+
+  const buildWhatsAppMessage = () => {
+    if (!result || !selectedFac) return ''
+
+    const intro = [
+      'ScheduleAI update',
+      `Absent faculty: ${selectedFac.name}`,
+      `Timetable: ${selectedTt?.name || `#${selTtId}`}`,
+      `Status: ${result.status}`,
+      `Updated slots: ${result.modified_count ?? modifiedSlots.length}`,
+      `Substitutes: ${result.substituted_count ?? 0}`,
+      `Breaks: ${result.break_count ?? 0}`,
+    ]
+
+    const slotLines = modifiedSlots.slice(0, 5).map((slot: any) =>
+      `- ${slot.section_name}: ${slot.course_name} on ${DAYS[slot.day] || `Day ${slot.day + 1}`} P${slot.period + 1} with ${slot.faculty_name}`
+    )
+
+    if (modifiedSlots.length > 5) {
+      slotLines.push(`- ${modifiedSlots.length - 5} more updated slot(s)`)
+    }
+
+    return [...intro, '', 'Changed slots:', ...(slotLines.length ? slotLines : ['- No slot changes'])].join('\n')
+  }
+
+  const sendWhatsApp = async () => {
+    if (!result) return toast.error('Run what-if first')
+    if (!selectedFac) return toast.error('Select a faculty member first')
+    if (!crNumber.trim()) return toast.error('Enter the CR mobile number')
+
+    setSending(true)
+    const t = toast.loading('Sending WhatsApp message…')
+    try {
+      const response = await API.sendWhatsApp({
+        to_number: crNumber.trim(),
+        message: buildWhatsAppMessage(),
+      })
+      toast.dismiss(t)
+      toast.success(`WhatsApp sent successfully${response.sid ? ` (${response.sid})` : ''}`)
+    } catch (error) {
+      toast.dismiss(t)
+      toast.error(getErrorMessage(error, 'Unable to send WhatsApp message'))
+    } finally {
+      setSending(false)
+    }
+  }
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -118,6 +167,34 @@ export default function WhatIf() {
             </select>
           </div>
         </div>
+
+        {selFac && (
+          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto]">
+            <div>
+              <label className="label">CR Mobile Number</label>
+              <input
+                className="input"
+                value={crNumber}
+                onChange={e => setCrNumber(e.target.value)}
+                placeholder="+919876543210"
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                The message will be sent to this WhatsApp number through your configured Twilio sender.
+              </p>
+            </div>
+            <div className="flex items-end">
+              <button
+                className="btn-secondary py-3 px-5"
+                onClick={sendWhatsApp}
+                disabled={sending || !result || !crNumber.trim()}
+              >
+                {sending
+                  ? <><span className="spinner w-4 h-4" />Sending…</>
+                  : <><MessageCircle className="w-4 h-4" />Send WhatsApp</>}
+              </button>
+            </div>
+          </div>
+        )}
 
         <div>
           <label className="label">Affected Days (leave empty = all days)</label>

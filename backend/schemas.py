@@ -100,6 +100,8 @@ class SectionCreate(BaseModel):
     name: str
     student_count: int = Field(default=60, ge=1)
     semester: int = Field(default=1, ge=1)
+    class_representative_name: str = ""
+    class_representative_phone: str = ""
 
 
 class SectionOut(SectionCreate):
@@ -181,6 +183,43 @@ class NLPExecuteResponse(BaseModel):
     executed: bool
     description: str
     result: Dict[str, Any] = {}
+
+
+# ─── Notifications ────────────────────────────────────────────────────────────
+class WhatsAppSendRequest(BaseModel):
+    to_number: str = Field(..., description="E.164 number, optionally prefixed with 'whatsapp:'")
+    message: str = Field(..., min_length=1, max_length=4096)
+
+
+class WhatsAppSendResponse(BaseModel):
+    ok: bool = True
+    sid: str
+
+
+class WhatsAppSectionSendRequest(BaseModel):
+    section_ids: List[int] = Field(..., min_length=1)
+    message: str = Field(..., min_length=1, max_length=4096)
+
+
+class WhatsAppSectionDelivery(BaseModel):
+    section_id: int
+    section_name: str
+    to_number: str
+    sid: str
+
+
+class WhatsAppSectionSkipped(BaseModel):
+    section_id: int
+    section_name: str
+    reason: str
+
+
+class WhatsAppSectionSendResponse(BaseModel):
+    ok: bool = True
+    sent_count: int
+    skipped_count: int
+    deliveries: List[WhatsAppSectionDelivery]
+    skipped: List[WhatsAppSectionSkipped]
 
 
 # ─── Slot responses ───────────────────────────────────────────────────────────

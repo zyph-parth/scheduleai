@@ -60,6 +60,8 @@ export interface Section {
   name: string
   student_count: number
   semester: number
+  class_representative_name?: string
+  class_representative_phone?: string
 }
 
 export interface SectionCourse {
@@ -180,6 +182,8 @@ export interface SectionPayload {
   name: string
   student_count: number
   semester: number
+  class_representative_name?: string
+  class_representative_phone?: string
 }
 
 export interface SectionCoursePayload {
@@ -201,6 +205,16 @@ export interface GenerateRequest {
   semester?: string
   locked_slots?: unknown[]
   max_solve_seconds?: number
+}
+
+export interface WhatsAppSendPayload {
+  to_number: string
+  message: string
+}
+
+export interface WhatsAppSendResponse {
+  ok: boolean
+  sid: string
 }
 
 export function getErrorMessage(error: unknown, fallback = 'Something went wrong') {
@@ -331,6 +345,8 @@ export const API = {
     `/api/timetables/${timetableId}/export/excel`,
   exportPdf: (timetableId: number) =>
     `/api/timetables/${timetableId}/export/pdf`,
+  sendWhatsApp: (data: WhatsAppSendPayload) =>
+    api.post<WhatsAppSendResponse>('/notifications/whatsapp/send', data).then((r) => r.data),
 
   parseConstraint: (institutionId: number, text: string) =>
     api.post('/nlp/parse-constraint', { institution_id: institutionId, text }).then((r) => r.data),

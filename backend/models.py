@@ -89,6 +89,8 @@ class Section(Base):
     name = Column(String, nullable=False)
     student_count = Column(Integer, default=60)
     semester = Column(Integer, default=1)
+    class_representative_name = Column(String, default="")
+    class_representative_phone = Column(String, default="")
 
     department = relationship("Department", back_populates="sections")
     section_courses = relationship("SectionCourse", back_populates="section", cascade="all, delete")
