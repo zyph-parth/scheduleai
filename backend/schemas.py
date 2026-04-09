@@ -6,18 +6,18 @@ from datetime import datetime
 # ─── Institution ─────────────────────────────────────────────────────────────
 class InstitutionCreate(BaseModel):
     name: str
-    working_days: List[int] = [0, 1, 2, 3, 4]
-    periods_per_day: Dict[str, List[int]] = {
+    working_days: List[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
+    periods_per_day: Dict[str, List[int]] = Field(default_factory=lambda: {
         "0": [0,1,2,3,4,5,6,7],
         "1": [0,1,2,3,4,5,6,7],
         "2": [0,1,2,3,4,5,6,7],
         "3": [0,1,2,3,4,5,6,7],
         "4": [0,1,2,3,4,5,6,7],
-    }
-    break_slots: Dict[str, List[int]] = {
+    })
+    break_slots: Dict[str, List[int]] = Field(default_factory=lambda: {
         "0": [3], "1": [3], "2": [3], "3": [3], "4": [3]
-    }
-    period_duration_minutes: int = 50
+    })
+    period_duration_minutes: int = Field(default=50, ge=1)
     start_time: str = "09:00"
 
 
@@ -44,7 +44,7 @@ class DepartmentOut(DepartmentCreate):
 class RoomCreate(BaseModel):
     institution_id: int
     name: str
-    capacity: int
+    capacity: int = Field(default=60, ge=1)
     room_type: str = "classroom"   # classroom | lab | lecture_hall
 
 
@@ -65,9 +65,9 @@ class FacultyCreate(BaseModel):
     name: str
     email: str = ""
     phone: str = ""
-    subjects: List[str] = []
-    unavailable_slots: List[UnavailableSlot] = []
-    max_consecutive_periods: int = 3
+    subjects: List[str] = Field(default_factory=list)
+    unavailable_slots: List[UnavailableSlot] = Field(default_factory=list)
+    max_consecutive_periods: int = Field(default=3, ge=1)
 
 
 class FacultyOut(FacultyCreate):
@@ -81,9 +81,9 @@ class CourseCreate(BaseModel):
     department_id: int
     name: str
     code: str = ""
-    theory_hours: int = 3
-    practical_hours: int = 0
-    credit_hours: int = 3
+    theory_hours: int = Field(default=3, ge=0)
+    practical_hours: int = Field(default=0, ge=0)
+    credit_hours: int = Field(default=3, ge=0)
     is_core: bool = False
     requires_lab: bool = False
 
@@ -98,8 +98,8 @@ class CourseOut(CourseCreate):
 class SectionCreate(BaseModel):
     department_id: int
     name: str
-    student_count: int = 60
-    semester: int = 1
+    student_count: int = Field(default=60, ge=1)
+    semester: int = Field(default=1, ge=1)
 
 
 class SectionOut(SectionCreate):
@@ -124,7 +124,7 @@ class SectionCourseOut(SectionCourseCreate):
 # ─── CombinedGroup ────────────────────────────────────────────────────────────
 class CombinedGroupCreate(BaseModel):
     institution_id: int
-    section_ids: List[int]
+    section_ids: List[int] = Field(min_length=2)
     course_id: int
     faculty_id: int
 
@@ -140,14 +140,14 @@ class GenerateRequest(BaseModel):
     institution_id: int
     name: str = "Semester Timetable"
     semester: str = ""
-    locked_slots: List[Dict[str, Any]] = []
-    max_solve_seconds: int = 60
+    locked_slots: List[Dict[str, Any]] = Field(default_factory=list)
+    max_solve_seconds: int = Field(default=60, ge=1, le=300)
 
 
 class WhatIfRequest(BaseModel):
     timetable_id: int
     absent_faculty_id: int
-    affected_days: List[int] = []       # empty = all days
+    affected_days: List[int] = Field(default_factory=list)       # empty = all days
 
 
 class SubstituteRequest(BaseModel):

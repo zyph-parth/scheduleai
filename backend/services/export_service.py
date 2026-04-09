@@ -33,6 +33,7 @@ def export_excel(
     DAY_FILL      = PatternFill("solid", fgColor="334155")
     THEORY_FILL   = PatternFill("solid", fgColor="DBEAFE")
     LAB_FILL      = PatternFill("solid", fgColor="D1FAE5")
+    BREAK_FILL    = PatternFill("solid", fgColor="FEF3C7")
     EMPTY_FILL    = PatternFill("solid", fgColor="F8FAFC")
     BORDER_SIDE   = Side(style="thin", color="CBD5E1")
     CELL_BORDER   = Border(
@@ -96,13 +97,17 @@ def export_excel(
                 cell = ws.cell(row=row_i, column=col_i)
                 if matching:
                     sl = matching[0]
-                    text = (
-                        f"{sl.get('course_name','')}\n"
-                        f"{sl.get('faculty_name','')}\n"
-                        f"{sl.get('room_name','')}"
-                    )
+                    if sl.get("slot_type") == "break":
+                        text = "Break Lecture\nNo substitute available\nFree period"
+                        cell.fill = BREAK_FILL
+                    else:
+                        text = (
+                            f"{sl.get('course_name','')}\n"
+                            f"{sl.get('faculty_name','')}\n"
+                            f"{sl.get('room_name','')}"
+                        )
+                        cell.fill  = LAB_FILL if sl.get("slot_type") == "lab" else THEORY_FILL
                     cell.value = text
-                    cell.fill  = LAB_FILL if sl.get("slot_type") == "lab" else THEORY_FILL
                     cell.font  = Font(name="Calibri", size=9)
                     cell.alignment = Alignment(
                         horizontal="center", vertical="center", wrap_text=True
@@ -175,6 +180,7 @@ def export_pdf(
     SLATE = colors.HexColor("#334155")
     BLUE  = colors.HexColor("#DBEAFE")
     GREEN = colors.HexColor("#D1FAE5")
+    AMBER = colors.HexColor("#FEF3C7")
     WHITE = colors.white
 
     for sec_id in (section_ids or [None]):
@@ -206,11 +212,14 @@ def export_pdf(
                 ]
                 if matching:
                     sl = matching[0]
-                    txt = (
-                        f"<b>{sl.get('course_name','')}</b><br/>"
-                        f"{sl.get('faculty_name','')}<br/>"
-                        f"<i>{sl.get('room_name','')}</i>"
-                    )
+                    if sl.get("slot_type") == "break":
+                        txt = "<b>Break Lecture</b><br/>No substitute available<br/><i>Free period</i>"
+                    else:
+                        txt = (
+                            f"<b>{sl.get('course_name','')}</b><br/>"
+                            f"{sl.get('faculty_name','')}<br/>"
+                            f"<i>{sl.get('room_name','')}</i>"
+                        )
                     row.append(Paragraph(txt, cell_style))
                 else:
                     row.append(Paragraph("", cell_style))
@@ -241,7 +250,8 @@ def export_pdf(
                     and s.get("slot_type") == "lab"
                 ]
                 if matching:
-                    style_cmds.append(("BACKGROUND", (c_i, r_i), (c_i, r_i), GREEN))
+                    fill_color = AMBER if matching[0].get("slot_type") == "break" else GREEN
+                    style_cmds.append(("BACKGROUND", (c_i, r_i), (c_i, r_i), fill_color))
 
         tbl.setStyle(TableStyle(style_cmds))
         story.append(tbl)
