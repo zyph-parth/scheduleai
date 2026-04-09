@@ -307,11 +307,11 @@ export default function TimetablePage() {
           {!loading && tt && (
             <div className="bg-white border border-[#E4E7EF] rounded-xl shadow-sm overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse" style={{ tableLayout: 'fixed' }}>
+                <table className="w-full bg-[#F8F9FC]" style={{ tableLayout: 'fixed', borderCollapse: 'separate', borderSpacing: '0' }}>
                   {/* Header */}
                   <thead>
                     <tr>
-                      <th className="w-20 bg-[#F8F9FC] text-[#64748B] text-[10px] uppercase tracking-wider font-semibold p-2 border-b border-r border-[#E4E7EF] text-center sticky left-0 z-10">
+                      <th className="w-20 bg-[#F8F9FC] text-[#64748B] text-[10px] uppercase tracking-wider font-semibold p-3 border-b border-r border-[#E4E7EF] text-center sticky left-0 z-10">
                         Period
                       </th>
                       {workingDays.map(d => (
@@ -335,13 +335,15 @@ export default function TimetablePage() {
                       if (isBr) {
                         return (
                           <tr key={p}>
-                            <td className="bg-[#FFFBEB] p-2 border-b border-r border-[#E4E7EF] text-center sticky left-0 z-10">
+                            <td className="bg-[#FFFBEB] p-3 border-b border-r border-[#E4E7EF] text-center sticky left-0 z-10">
                               <div className="text-[10px] text-[#D97706] font-bold uppercase tracking-wider">Break</div>
                               <div className="text-[9px] text-[#94A3B8]">{timeInfo.start}</div>
                             </td>
                             {workingDays.map(d => (
-                              <td key={d} className="bg-[#FFFBEB] border-b border-r border-[#E4E7EF] p-2 text-center">
-                                <span className="text-[10px] text-[#D97706]/60 font-medium uppercase tracking-wider">Lunch Break</span>
+                              <td key={d} className="bg-[#FFFBEB] border-b border-r border-[#E4E7EF] p-3 text-center">
+                                <div className="rounded-lg border border-[#FDE68A] bg-[#FFF7D6] px-3 py-5">
+                                  <span className="text-[10px] text-[#D97706]/70 font-medium uppercase tracking-wider">Lunch Break</span>
+                                </div>
                               </td>
                             ))}
                           </tr>
@@ -351,7 +353,7 @@ export default function TimetablePage() {
                       return (
                         <tr key={p} className="group hover:bg-[#F8F9FC]/60 transition-colors">
                           {/* Period label */}
-                          <td className="p-2 border-b border-r border-[#E4E7EF] text-center sticky left-0 z-10 bg-white w-[4.5rem]">
+                          <td className="p-3 border-b border-r border-[#E4E7EF] text-center sticky left-0 z-10 bg-white w-[4.5rem]">
                             <div className="flex flex-col items-center justify-center">
                               <span className="text-sm font-bold text-[#0F172A]">P{p + 1}</span>
                               <span className="text-[10px] text-[#64748B] mt-0.5 tracking-tight">{timeInfo.start}</span>
@@ -363,8 +365,8 @@ export default function TimetablePage() {
                           {workingDays.map(d => {
                             if (!hasPeriod(d, p)) {
                               return (
-                                <td key={d} className="border-b border-r border-[#E4E7EF] p-1 bg-[#F8F9FC]/40">
-                                  <div className="h-16 flex items-center justify-center">
+                                <td key={d} className="border-b border-r border-[#E4E7EF] p-2 bg-[#F8F9FC]">
+                                  <div className="h-20 rounded-lg border border-dashed border-[#E2E8F0] bg-[#F8FAFC] flex items-center justify-center">
                                     <span className="text-[10px] text-[#CBD5E1]">—</span>
                                   </div>
                                 </td>
@@ -373,9 +375,9 @@ export default function TimetablePage() {
 
                             if (isBreak(d, p)) {
                               return (
-                                <td key={d} className="border-b border-r border-[#E4E7EF] p-1 bg-[#FFFBEB]">
-                                  <div className="h-16 flex items-center justify-center">
-                                    <span className="text-[10px] text-[#D97706]/50 font-medium">Break</span>
+                                <td key={d} className="border-b border-r border-[#E4E7EF] p-2 bg-[#FFFDF5]">
+                                  <div className="h-20 rounded-lg border border-[#FDE68A] bg-[#FFFBEB] flex items-center justify-center">
+                                    <span className="text-[10px] text-[#D97706]/60 font-medium">Break</span>
                                   </div>
                                 </td>
                               )
@@ -384,13 +386,13 @@ export default function TimetablePage() {
                             const cellSlots = slotGrid[d]?.[p] || []
 
                             return (
-                              <td key={d} className="border-b border-r border-[#E4E7EF] p-1 align-top bg-white">
+                              <td key={d} className="border-b border-r border-[#E4E7EF] px-3 py-2 align-top bg-[#F8F9FC]">
                                 <div className={clsx(
-                                  'min-h-[4.5rem] flex flex-col gap-1',
-                                  cellSlots.length === 0 && 'items-center justify-center'
+                                  'min-h-[5.25rem] rounded-xl bg-white p-1.5 flex flex-col gap-1.5',
+                                  cellSlots.length === 0 && 'items-center justify-center border border-dashed border-[#E2E8F0]'
                                 )}>
                                   {cellSlots.length === 0 && (
-                                    <span className="text-[10px] text-[#E2E8F0]">—</span>
+                                    <span className="text-[10px] text-[#CBD5E1]">—</span>
                                   )}
                                   {cellSlots.map(slot => {
                                     const color = getSlotColor(slot)
@@ -399,7 +401,7 @@ export default function TimetablePage() {
                                         key={slot.id}
                                         onClick={() => handleSlotClick(slot)}
                                         className={clsx(
-                                          'w-full rounded-lg p-2.5 text-left transition-all duration-150',
+                                          'w-full rounded-lg px-4 py-2.5 text-left transition-all duration-150',
                                           'hover:scale-[1.02] active:scale-[0.98] cursor-pointer',
                                           'shadow-sm hover:shadow-md ring-1',
                                           color.bg, color.ring
