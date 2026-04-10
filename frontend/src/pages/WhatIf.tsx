@@ -21,6 +21,7 @@ export default function WhatIf() {
   const [sending,      setSending]      = useState(false)
   const [result,       setResult]       = useState<any>(null)
   const [crNumber,     setCrNumber]     = useState('')
+  const [taNumber,     setTaNumber]     = useState('')
 
   useEffect(() => { API.getInstitutions().then(d => { setInstitutions(d); if (d.length) setSelInst(d[0].id) }) }, [])
   useEffect(() => {
@@ -92,17 +93,31 @@ export default function WhatIf() {
   const sendWhatsApp = async () => {
     if (!result) return toast.error('Run what-if first')
     if (!selectedFac) return toast.error('Select a faculty member first')
-    if (!crNumber.trim()) return toast.error('Enter the CR mobile number')
+    if (!crNumber.trim() && !taNumber.trim()) return toast.error('Enter at least one mobile number')
 
     setSending(true)
     const t = toast.loading('Sending WhatsApp message…')
     try {
-      const response = await API.sendWhatsApp({
-        to_number: crNumber.trim(),
-        message: buildWhatsAppMessage(),
-      })
+      const numbers = [
+        { label: 'CR', value: crNumber.trim() },
+        { label: 'TA', value: taNumber.trim() },
+      ].filter((entry) => entry.value)
+
+      const responses = await Promise.all(
+        numbers.map((entry) =>
+          API.sendWhatsApp({
+            to_number: entry.value,
+            message: buildWhatsAppMessage(),
+          }).then((response) => ({ ...entry, sid: response.sid }))
+        )
+      )
+
       toast.dismiss(t)
-      toast.success(`WhatsApp sent successfully${response.sid ? ` (${response.sid})` : ''}`)
+      toast.success(
+        responses.length === 1
+          ? `WhatsApp sent to ${responses[0].label}${responses[0].sid ? ` (${responses[0].sid})` : ''}`
+          : `WhatsApp sent to ${responses.length} recipients`
+      )
     } catch (error) {
       toast.dismiss(t)
       toast.error(getErrorMessage(error, 'Unable to send WhatsApp message'))
@@ -169,7 +184,7 @@ export default function WhatIf() {
         </div>
 
         {selFac && (
-          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
             <div>
               <label className="label">CR Mobile Number</label>
               <input
@@ -182,11 +197,23 @@ export default function WhatIf() {
                 The message will be sent to this WhatsApp number through your configured Twilio sender.
               </p>
             </div>
+            <div>
+              <label className="label">TA Mobile Number</label>
+              <input
+                className="input"
+                value={taNumber}
+                onChange={e => setTaNumber(e.target.value)}
+                placeholder="+919876543210"
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                Add the TA WhatsApp number to send the same update there as well.
+              </p>
+            </div>
             <div className="flex items-end">
               <button
                 className="btn-secondary py-3 px-5"
                 onClick={sendWhatsApp}
-                disabled={sending || !result || !crNumber.trim()}
+                disabled={sending || !result || (!crNumber.trim() && !taNumber.trim())}
               >
                 {sending
                   ? <><span className="spinner w-4 h-4" />Sending…</>
