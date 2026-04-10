@@ -30,28 +30,73 @@
 
 ---
 
-### The question
+## What ScheduleAI does
 
-> **What if the hardest week on campus isn’t the first week of teaching — but the week before, when someone tries to squeeze every room, every professor, every lab block, and every combined lecture into a grid that still has to *breathe*?**
+**ScheduleAI** is a full-stack academic timetable platform for colleges and departments. It helps planners define the institution, generate conflict-aware schedules with **OR-Tools CP-SAT**, handle real-world disruptions, and publish the final timetable in formats people can actually use.
 
-That’s the itch **ScheduleAI** scratches: not a lifeless spreadsheet you pray over, but a system that **models** your institution, **searches** for feasible timetables under real constraints, and **adapts** when Monday looks nothing like the plan.
+Instead of manually dragging classes around a spreadsheet, the system:
+
+- models rooms, faculty, sections, courses, labs, breaks, and combined lectures
+- solves for feasible schedules under hard constraints
+- supports post-generation operations like locks, substitutes, and what-if absence handling
+- explains outcomes with analytics, diagnostics, and exportable stakeholder views
 
 ---
 
-### Why open this repo?
+## Why it stands out
 
 |     | Why it matters |
 | --- | -------------- |
-| 🧩 | **“Is this mess even *solvable*?”** — **OR-Tools CP-SAT** returns a grid *or* clear diagnostics (overload, rooms, locks, labs…). |
-| 🔁 | **“What if a professor is away?”** — **What-if** clones the timetable, finds **substitutes**, or marks honest **breaks**. |
-| 📊 | **“Are we fair to people and rooms?”** — **Analytics**: load, utilization, gaps, core-in-morning. |
-| 🎓 | **“Who needs to see this?”** — **Student** & **teacher** views, **Excel/PDF**, optional **WhatsApp**. |
-| 💬 | **“Can I say the rule in English?”** — **NLP** parses constraints (cloud + local fallback). |
-
+| 🧩 | **Constraint-first solving** — **OR-Tools CP-SAT** produces a valid timetable or structured diagnostics when the input is infeasible. |
+| 🔁 | **Operational after generation** — planners can **lock slots**, run **what-if** scenarios, and assign **substitutes** without restarting from scratch. |
+| 📊 | **Decision support** — built-in **analytics** surface faculty load, room utilization, section gaps, and morning-core placement. |
+| 🎓 | **Different views for different people** — admin workflow plus **student** and **teacher** views, with **Excel/PDF** export. |
+| 💬 | **Natural-language constraints** — an **NLP parser** converts plain English rules into structured scheduling constraints. |
 
 ---
 
+## Product flow
+
+```text
+Setup institution data
+        ↓
+Generate timetable with CP-SAT
+        ↓
+Inspect conflicts, slots, and room assignment
+        ↓
+Lock / substitute / run what-if scenarios
+        ↓
+Analyze fairness and utilization
+        ↓
+Export and share with students and faculty
+```
+
 <p align="center"><code>frontend/</code> · SPA · Vite · TypeScript · Tailwind &nbsp;·&nbsp; <code>backend/</code> · FastAPI · SQLAlchemy · solver in <code>solver/engine.py</code></p>
+
+---
+
+## Quick start
+
+```bash
+# backend
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+
+# frontend
+cd frontend
+npm install
+npm run dev
+```
+
+Open the UI at `http://localhost:5173` and the API docs at `http://localhost:8000/docs`.
+
+For the fastest demo path:
+
+1. Run `python seed.py` inside `backend/`
+2. Open **Dashboard**
+3. Generate a timetable
+4. Explore **Timetable**, **What-If**, **Analytics**, **Student**, and **Teacher** views
 
 ---
 
@@ -79,7 +124,7 @@ That’s the itch **ScheduleAI** scratches: not a lifeless spreadsheet you pray 
 
 ## What we built
 
-*For judges / reviewers — what each layer of the repo actually does.*
+*For judges / reviewers: what each layer is responsible for.*
 
 
 | Piece | What it is |
@@ -92,7 +137,7 @@ That’s the itch **ScheduleAI** scratches: not a lifeless spreadsheet you pray 
 | **`backend/seed.py`** | Demo dataset so you can generate immediately. |
 | **Tests** | `backend/tests/test_backend.py` — generation, overlaps, locks, what-if, analytics, exports. |
 
-**Run:** `cd backend && pip install -r requirements.txt && uvicorn main:app --reload --port 8000` · `cd frontend && npm i && npm run dev` — UI `http://localhost:5173`, API docs `http://localhost:8000/docs`. Optional: `python seed.py` in `backend/`.
+**Local run:** backend on `http://localhost:8000`, frontend on `http://localhost:5173`, optional demo seed via `python seed.py` in `backend/`.
 
 ---
 
