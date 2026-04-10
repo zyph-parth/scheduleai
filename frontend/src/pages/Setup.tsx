@@ -169,6 +169,11 @@ function getPeriodList(inst?: Institution | null, day?: number) {
   return inst.periods_per_day[String(day)] || []
 }
 
+function formatSectionLabel(section?: Section | null) {
+  if (!section) return ''
+  return `${section.name} - Sem ${section.semester}`
+}
+
 function Panel({
   title,
   icon: Icon,
@@ -267,10 +272,17 @@ function AvailabilityGrid({
   )
 }
 
-function NLPBox({ institutionId }: { institutionId: number }) {
+function NLPBox({
+  institutionId,
+  onExecuted,
+}: {
+  institutionId: number
+  onExecuted?: () => Promise<void> | void
+}) {
   const [text, setText] = useState('')
   const [result, setResult] = useState<any>(null)
   const [loading, setLoading] = useState(false)
+  const [executing, setExecuting] = useState(false)
 
   const parse = async () => {
     if (!text.trim()) return
@@ -283,6 +295,25 @@ function NLPBox({ institutionId }: { institutionId: number }) {
       toast.error(getErrorMessage(error, 'Unable to parse constraint'))
     } finally {
       setLoading(false)
+    }
+  }
+
+  const execute = async () => {
+    if (!text.trim()) return
+    setExecuting(true)
+    try {
+      const executed = await API.executeConstraint(institutionId, text)
+      setResult(executed)
+      if (executed.executed) {
+        toast.success(executed.description)
+        await onExecuted?.()
+      } else {
+        toast(executed.description, { icon: 'i' })
+      }
+    } catch (error) {
+      toast.error(getErrorMessage(error, 'Unable to apply constraint'))
+    } finally {
+      setExecuting(false)
     }
   }
 
@@ -302,10 +333,14 @@ function NLPBox({ institutionId }: { institutionId: number }) {
           {loading ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <Cpu className="w-4 h-4" />}
           Parse
         </button>
+        <button className={`${btnSecondary} shrink-0`} onClick={execute} disabled={executing || !text.trim()}>
+          {executing ? <span className="w-4 h-4 border-2 border-gray-500 border-t-transparent rounded-full animate-spin" /> : <Save className="w-4 h-4" />}
+          Apply
+        </button>
       </div>
       {result && (
         <div className="mt-3 p-3 rounded-xl bg-white border border-gray-200 shadow-sm">
-          <p className="text-xs text-emerald-600 font-semibold mb-1">{result.description}</p>
+          <p className={clsx('text-xs font-semibold mb-1', result.executed ? 'text-emerald-600' : 'text-blue-600')}>{result.description}</p>
           <pre className="text-xs text-gray-500 overflow-x-auto">{JSON.stringify(result.parsed, null, 2)}</pre>
           <p className="text-xs text-gray-400 mt-1">Confidence: {Math.round((result.confidence || 0.5) * 100)}%</p>
         </div>
@@ -347,7 +382,13 @@ export default function Setup() {
     is_core: false,
     requires_lab: false,
   })
-  const [newSection, setNewSection] = useState({ name: '', student_count: 60, semester: 1 })
+  const [newSection, setNewSection] = useState({
+    name: '',
+    student_count: 60,
+    semester: 1,
+    class_representative_name: '',
+    class_representative_phone: '',
+  })
   const [newAssignment, setNewAssignment] = useState({ section_id: 0, course_id: 0, faculty_id: 0 })
   const [newCombinedGroup, setNewCombinedGroup] = useState({ section_ids: [] as number[], course_id: 0, faculty_id: 0 })
 
@@ -632,8 +673,16 @@ export default function Setup() {
         name: newSection.name.trim(),
         student_count: Number(newSection.student_count),
         semester: Number(newSection.semester),
+        class_representative_name: newSection.class_representative_name.trim(),
+        class_representative_phone: newSection.class_representative_phone.trim(),
       })
-      setNewSection({ name: '', student_count: 60, semester: 1 })
+      setNewSection({
+        name: '',
+        student_count: 60,
+        semester: 1,
+        class_representative_name: '',
+        class_representative_phone: '',
+      })
       toast.success('Section added')
       await Promise.all([loadInstitutionWorkspace(selInst!, selDept), loadDepartmentWorkspace(selDept)])
     } catch (error) {
@@ -828,7 +877,7 @@ export default function Setup() {
         </div>
       </Panel>
 
-      {selInst && <NLPBox institutionId={selInst} />}
+      {selInst && <NLPBox institutionId={selInst} onExecuted={() => loadInstitutionWorkspace(selInst, selDept)} />}
 
       {selInst && (
         <Panel title={`Departments (${departments.length})`} icon={Building2} colour="purple">
@@ -1023,11 +1072,30 @@ export default function Setup() {
           </Panel>
 
           <Panel title={`Sections (${sections.length})`} icon={GraduationCap} colour="green">
-            <div className="flex gap-2 mb-4 flex-wrap">
-              <input className={`${inputCls} flex-1 min-w-40`} placeholder="Section name" value={newSection.name} onChange={(event) => setNewSection((current) => ({ ...current, name: event.target.value }))} />
-              <input className={`${inputCls} w-32`} type="number" min={1} placeholder="Students" value={newSection.student_count} onChange={(event) => setNewSection((current) => ({ ...current, student_count: Number(event.target.value) }))} />
-              <input className={`${inputCls} w-24`} type="number" min={1} placeholder="Semester" value={newSection.semester} onChange={(event) => setNewSection((current) => ({ ...current, semester: Number(event.target.value) }))} />
-              <button className={`${btnPrimary} shrink-0`} onClick={addSection}><Plus className="w-4 h-4" />Add Section</button>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-[1.1fr,0.8fr,0.7fr,1fr,1fr,auto] gap-3 mb-4">
+              <div>
+                <label className={labelCls}>Section Name</label>
+                <input className={inputCls} placeholder="Section name" value={newSection.name} onChange={(event) => setNewSection((current) => ({ ...current, name: event.target.value }))} />
+              </div>
+              <div>
+                <label className={labelCls}>Students</label>
+                <input className={inputCls} type="number" min={1} placeholder="Students" value={newSection.student_count} onChange={(event) => setNewSection((current) => ({ ...current, student_count: Number(event.target.value) }))} />
+              </div>
+              <div>
+                <label className={labelCls}>Semester</label>
+                <input className={inputCls} type="number" min={1} placeholder="Semester" value={newSection.semester} onChange={(event) => setNewSection((current) => ({ ...current, semester: Number(event.target.value) }))} />
+              </div>
+              <div>
+                <label className={labelCls}>CR Name</label>
+                <input className={inputCls} placeholder="Optional class representative" value={newSection.class_representative_name} onChange={(event) => setNewSection((current) => ({ ...current, class_representative_name: event.target.value }))} />
+              </div>
+              <div>
+                <label className={labelCls}>CR WhatsApp</label>
+                <input className={inputCls} placeholder="+919876543210" value={newSection.class_representative_phone} onChange={(event) => setNewSection((current) => ({ ...current, class_representative_phone: event.target.value }))} />
+              </div>
+              <div className="flex items-end">
+                <button className={`${btnPrimary} shrink-0 w-full justify-center`} onClick={addSection}><Plus className="w-4 h-4" />Add Section</button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
@@ -1036,8 +1104,14 @@ export default function Setup() {
                   <div>
                     <p className="font-semibold text-gray-800 text-sm">{section.name}</p>
                     <p className="text-xs text-gray-500 mt-0.5">{section.student_count} students • Sem {section.semester}</p>
+                    {(section.class_representative_name || section.class_representative_phone) && (
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        CR: {section.class_representative_name || 'Not set'}
+                        {section.class_representative_phone ? ` • ${section.class_representative_phone}` : ''}
+                      </p>
+                    )}
                   </div>
-                  <button className={btnIcon} onClick={() => confirmAndRun(`Delete section "${section.name}"?`, async () => { await API.deleteSection(section.id); toast.success('Section deleted'); await Promise.all([loadInstitutionWorkspace(selInst!, selDept), loadDepartmentWorkspace(selDept)]) })}>
+                  <button className={btnIcon} onClick={() => confirmAndRun(`Delete section "${formatSectionLabel(section)}"?`, async () => { await API.deleteSection(section.id); toast.success('Section deleted'); await Promise.all([loadInstitutionWorkspace(selInst!, selDept), loadDepartmentWorkspace(selDept)]) })}>
                     <Trash2 className="w-3 h-3 text-red-400" />
                   </button>
                 </div>
@@ -1047,7 +1121,7 @@ export default function Setup() {
 
           <Panel title={`Section-Course Assignments (${sectionCourses.length})`} icon={Link2} colour="blue">
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
-              <div><label className={labelCls}>Section</label><select className={selectCls} value={newAssignment.section_id} onChange={(event) => setNewAssignment((current) => ({ ...current, section_id: Number(event.target.value) }))}><option value={0}>Select section…</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}</select></div>
+              <div><label className={labelCls}>Section</label><select className={selectCls} value={newAssignment.section_id} onChange={(event) => setNewAssignment((current) => ({ ...current, section_id: Number(event.target.value) }))}><option value={0}>Select section…</option>{sections.map((section) => <option key={section.id} value={section.id}>{formatSectionLabel(section)}</option>)}</select></div>
               <div><label className={labelCls}>Course</label><select className={selectCls} value={newAssignment.course_id} onChange={(event) => setNewAssignment((current) => ({ ...current, course_id: Number(event.target.value) }))}><option value={0}>Select course…</option>{courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}</select></div>
               <div>
                 <label className={labelCls}>Faculty</label>
@@ -1065,7 +1139,7 @@ export default function Setup() {
                 <tbody className="divide-y divide-gray-100">
                   {sectionCourses.map((assignment) => (
                     <tr key={assignment.id} className="hover:bg-gray-50 transition-colors">
-                      <td className="px-4 py-3 text-gray-800">{sectionMap[assignment.section_id]?.name || `Section ${assignment.section_id}`}</td>
+                      <td className="px-4 py-3 text-gray-800">{formatSectionLabel(sectionMap[assignment.section_id]) || `Section ${assignment.section_id}`}</td>
                       <td className="px-4 py-3 text-gray-800">{courseMap[assignment.course_id]?.name || `Course ${assignment.course_id}`}</td>
                       <td className="px-4 py-3 text-gray-800">{facultyMap[assignment.faculty_id]?.name || `Faculty ${assignment.faculty_id}`}</td>
                       <td className="px-4 py-3">
@@ -1089,7 +1163,7 @@ export default function Setup() {
                     {sections.map((section) => (
                       <label key={section.id} className={`${card} p-2 flex items-center gap-2 cursor-pointer`}>
                         <input type="checkbox" checked={newCombinedGroup.section_ids.includes(section.id)} onChange={() => setNewCombinedGroup((current) => ({ ...current, section_ids: toggleNumber(current.section_ids, section.id) }))} />
-                        <span className="text-sm text-gray-700">{section.name}</span>
+                        <span className="text-sm text-gray-700">{formatSectionLabel(section)}</span>
                       </label>
                     ))}
                   </div>
@@ -1118,7 +1192,7 @@ export default function Setup() {
                       </button>
                     </div>
                     <div className="flex flex-wrap gap-1 mt-2">
-                      {group.section_ids.map((sectionId) => <span key={sectionId} className={badgeBlue}>{sectionMap[sectionId]?.name || `Section ${sectionId}`}</span>)}
+                      {group.section_ids.map((sectionId) => <span key={sectionId} className={badgeBlue}>{formatSectionLabel(sectionMap[sectionId]) || `Section ${sectionId}`}</span>)}
                     </div>
                   </div>
                 ))}

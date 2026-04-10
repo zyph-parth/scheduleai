@@ -4,6 +4,7 @@ import toast from 'react-hot-toast'
 import {
   ArrowRight,
   CalendarDays,
+  GraduationCap,
   Gauge,
   Plus,
   RefreshCw,
@@ -11,7 +12,7 @@ import {
   TimerReset,
   Trash2,
 } from 'lucide-react'
-import { API, type Institution, type TimetableMeta } from '../api/client'
+import { API, type Department, type Institution, type Section, type TimetableMeta } from '../api/client'
 
 const STATUS_STYLES: Record<string, { label: string; background: string; color: string }> = {
   done: { label: 'Ready', background: '#dcfce7', color: '#166534' },
@@ -40,8 +41,12 @@ function formatCreatedAt(value: string) {
 export default function Dashboard() {
   const navigate = useNavigate()
   const [institutions, setInstitutions] = useState<Institution[]>([])
+  const [departments, setDepartments] = useState<Department[]>([])
+  const [sections, setSections] = useState<Section[]>([])
   const [timetables, setTimetables] = useState<TimetableMeta[]>([])
   const [selInst, setSelInst] = useState<number | null>(null)
+  const [selDept, setSelDept] = useState<number | null>(null)
+  const [selSemester, setSelSemester] = useState<number | null>(null)
   const [generating, setGenerating] = useState(false)
   const [ttName, setTtName] = useState('')
 
@@ -63,6 +68,31 @@ export default function Dashboard() {
     }
   }
 
+  const loadDepartments = async (instId: number) => {
+    try {
+      const data = await API.getDepartments(instId)
+      setDepartments(data)
+      setSelDept((current) => (
+        current && data.some((item) => item.id === current) ? current : data[0]?.id ?? null
+      ))
+    } catch {
+      toast.error('Failed to load departments')
+    }
+  }
+
+  const loadSections = async (deptId: number) => {
+    try {
+      const data = await API.getSections(deptId)
+      setSections(data)
+      const semesters = Array.from(new Set(data.map((item) => item.semester))).sort((a, b) => a - b)
+      setSelSemester((current) => (
+        current && semesters.includes(current) ? current : semesters[0] ?? null
+      ))
+    } catch {
+      toast.error('Failed to load sections')
+    }
+  }
+
   useEffect(() => {
     loadInstitutions()
   }, [])
@@ -71,9 +101,37 @@ export default function Dashboard() {
     if (selInst) loadTimetables(selInst)
   }, [selInst])
 
+  useEffect(() => {
+    if (!selInst) {
+      setDepartments([])
+      setSections([])
+      setSelDept(null)
+      setSelSemester(null)
+      return
+    }
+    loadDepartments(selInst)
+  }, [selInst])
+
+  useEffect(() => {
+    if (!selDept) {
+      setSections([])
+      setSelSemester(null)
+      return
+    }
+    loadSections(selDept)
+  }, [selDept])
+
   const generate = async () => {
     if (!selInst) {
       toast.error('Select an institution')
+      return
+    }
+    if (!selDept) {
+      toast.error('Select a branch/department')
+      return
+    }
+    if (!selSemester) {
+      toast.error('Select a semester')
       return
     }
 
@@ -83,15 +141,17 @@ export default function Dashboard() {
     try {
       const res = await API.generateTimetable({
         institution_id: selInst,
+        department_id: selDept,
         name: ttName || 'Untitled Timetable',
+        semester: selSemester,
         max_solve_seconds: 60,
       })
+      await loadTimetables(selInst)
 
       toast.dismiss(loadingToast)
 
       if (['done', 'optimal', 'feasible'].includes(res.status)) {
         toast.success(`Generated ${res.num_slots} slots in ${res.solve_time}s`)
-        loadTimetables(selInst)
         setTtName('')
       } else {
         toast.error(`Solver returned: ${res.status}`)
@@ -117,24 +177,31 @@ export default function Dashboard() {
   }
 
   const inst = institutions.find((item) => item.id === selInst)
-  const successfulTimetables = timetables.filter((item) =>
+  const selectedDepartment = departments.find((item) => item.id === selDept)
+  const semesterOptions = Array.from(new Set(sections.map((item) => item.semester))).sort((a, b) => a - b)
+  const visibleTimetables = timetables.filter((item) => {
+    if (selDept && item.department_id !== selDept) return false
+    if (selSemester && item.semester_number !== selSemester) return false
+    return true
+  })
+  const successfulTimetables = visibleTimetables.filter((item) =>
     ['done', 'optimal', 'feasible'].includes(item.status)
   )
-  const conflictFreePct = timetables.length
-    ? `${((successfulTimetables.length / timetables.length) * 100).toFixed(1)}%`
+  const conflictFreePct = visibleTimetables.length
+    ? `${((successfulTimetables.length / visibleTimetables.length) * 100).toFixed(1)}%`
     : '--'
-  const avgSolve = timetables.length
-    ? `${(timetables.reduce((sum, item) => sum + item.solve_time, 0) / timetables.length).toFixed(1)}s`
+  const avgSolve = visibleTimetables.length
+    ? `${(visibleTimetables.reduce((sum, item) => sum + item.solve_time, 0) / visibleTimetables.length).toFixed(1)}s`
     : '--'
-  const fastestSolve = timetables.length
-    ? `${Math.min(...timetables.map((item) => item.solve_time)).toFixed(1)}s`
+  const fastestSolve = visibleTimetables.length
+    ? `${Math.min(...visibleTimetables.map((item) => item.solve_time)).toFixed(1)}s`
     : '--'
-  const latestTimetable = timetables[0]
+  const latestTimetable = visibleTimetables[0]
 
   const stats = [
     {
       label: 'Timetables',
-      value: timetables.length.toString(),
+      value: visibleTimetables.length.toString(),
       note: latestTimetable ? `Latest: ${latestTimetable.name}` : 'No output yet',
       icon: CalendarDays,
     },
@@ -720,12 +787,12 @@ export default function Dashboard() {
                   {inst ? `${inst.name}` : 'No institution selected'}
                 </div>
                 <div className="dash-chip">
-                  <CalendarDays size={16} />
-                  {inst ? `${inst.working_days.length} working days` : 'Set up a calendar'}
+                  <GraduationCap size={16} />
+                  {selectedDepartment ? selectedDepartment.name : 'Select a branch'}
                 </div>
                 <div className="dash-chip">
-                  <TimerReset size={16} />
-                  Solver window up to 60 seconds
+                  <CalendarDays size={16} />
+                  {selSemester ? `Semester ${selSemester}` : 'Select a semester'}
                 </div>
               </div>
 
@@ -790,8 +857,8 @@ export default function Dashboard() {
                   <div>
                     <h2 className="dash-section-title">Generate a new timetable</h2>
                     <p className="dash-section-text">
-                      Pick the institution, give the run a clear name, and launch the solver. The
-                      form stays compact so the main job is obvious.
+                      Pick the institution, branch, and semester you want to solve, then give the
+                      run a clear name before launching the solver.
                     </p>
                   </div>
                 </div>
@@ -816,6 +883,44 @@ export default function Dashboard() {
                   </div>
 
                   <div>
+                    <label className="dash-field-label">Branch / Department</label>
+                    <select
+                      className="dash-select"
+                      value={selDept ?? ''}
+                      onChange={(e) => setSelDept(Number(e.target.value))}
+                      disabled={!departments.length}
+                    >
+                      <option value="" disabled>
+                        Select branch
+                      </option>
+                      {departments.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="dash-field-label">Semester</label>
+                    <select
+                      className="dash-select"
+                      value={selSemester ?? ''}
+                      onChange={(e) => setSelSemester(Number(e.target.value))}
+                      disabled={!semesterOptions.length}
+                    >
+                      <option value="" disabled>
+                        Select semester
+                      </option>
+                      {semesterOptions.map((item) => (
+                        <option key={item} value={item}>
+                          Semester {item}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
                     <label className="dash-field-label">Timetable name</label>
                     <input
                       className="dash-input"
@@ -828,14 +933,14 @@ export default function Dashboard() {
 
                 <div className="dash-form-footer">
                   <p className="dash-helper">
-                    Best results usually come from a fully configured setup with rooms, faculty, and
-                    section constraints already defined.
+                    Generation is now scoped to one institution, one branch, and one semester. That
+                    keeps the setup intent and the generated timetable aligned.
                   </p>
 
                   <button
                     className="dash-button-primary"
                     onClick={generate}
-                    disabled={generating || !selInst}
+                    disabled={generating || !selInst || !selDept || !selSemester}
                   >
                     {generating ? (
                       <>
@@ -857,7 +962,7 @@ export default function Dashboard() {
                   <div>
                     <h2 className="dash-section-title">Generated timetables</h2>
                     <p className="dash-section-text">
-                      Recent timetable runs for the selected institution. Tap any row to open the
+                      Recent timetable runs for the selected branch and semester. Tap any row to open the
                       detailed timetable view.
                     </p>
                   </div>
@@ -872,13 +977,13 @@ export default function Dashboard() {
                   </button>
                 </div>
 
-                {timetables.length === 0 ? (
+                {visibleTimetables.length === 0 ? (
                   <div className="dash-empty">
                     <CalendarDays size={34} color="#94a3b8" />
-                    <div className="dash-empty-title">No timetables yet</div>
+                    <div className="dash-empty-title">No timetables for this scope yet</div>
                     <p className="dash-empty-text">
-                      Generate the first run above and it will show up here with status, date, and
-                      quick actions.
+                      Generate a run for the selected branch and semester, and it will show up here
+                      with status, date, and quick actions.
                     </p>
                   </div>
                 ) : (
@@ -894,7 +999,7 @@ export default function Dashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {timetables.map((tt) => {
+                        {visibleTimetables.map((tt) => {
                           const status = STATUS_STYLES[tt.status] || {
                             label: tt.status,
                             background: '#e2e8f0',
@@ -909,7 +1014,7 @@ export default function Dashboard() {
                               <td>
                                 <p className="dash-table-name">{tt.name}</p>
                                 <p className="dash-table-meta">
-                                  {inst?.name ?? 'Institution'} - {tt.slot_count} slots
+                                  {tt.scope_label ?? (inst?.name ?? 'Institution')} - {tt.slot_count} slots
                                 </p>
                               </td>
                               <td>

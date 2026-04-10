@@ -84,6 +84,7 @@ export interface Slot {
   timetable_id: number
   section_id: number | null
   section_ids: number[]
+  section_labels?: string[]
   course_id: number
   faculty_id: number
   room_id: number | null
@@ -108,9 +109,15 @@ export interface TimetableMeta {
   solve_time: number
   created_at: string
   slot_count: number
+  department_id?: number | null
+  department_name?: string | null
+  semester_number?: number | null
+  scope_label?: string
 }
 
 export interface Timetable extends TimetableMeta {
+  institution_id?: number
+  institution_name?: string
   slots: Slot[]
   violations: { type: string; description: string; severity: string }[]
 }
@@ -201,8 +208,10 @@ export interface CombinedGroupPayload {
 
 export interface GenerateRequest {
   institution_id: number
+  department_id?: number
   name: string
-  semester?: string
+  semester?: number
+  source_timetable_id?: number
   locked_slots?: unknown[]
   max_solve_seconds?: number
 }
@@ -215,6 +224,35 @@ export interface WhatsAppSendPayload {
 export interface WhatsAppSendResponse {
   ok: boolean
   sid: string
+}
+
+export interface WhatsAppSectionSendPayload {
+  section_ids: number[]
+  message: string
+}
+
+export interface WhatsAppSectionSendResponse {
+  ok: boolean
+  sent_count: number
+  skipped_count: number
+  deliveries: Array<{ section_id: number; section_name: string; to_number: string; sid: string }>
+  skipped: Array<{ section_id: number; section_name: string; reason: string }>
+}
+
+export interface NLPConstraintResponse {
+  original_text: string
+  parsed: Record<string, unknown>
+  confidence: number
+  description: string
+}
+
+export interface NLPExecuteResponse {
+  original_text: string
+  parsed: Record<string, unknown>
+  action_type: string
+  executed: boolean
+  description: string
+  result: Record<string, unknown>
 }
 
 export function getErrorMessage(error: unknown, fallback = 'Something went wrong') {
@@ -316,18 +354,20 @@ export const API = {
         section_id: sectionId,
       },
     }).then((r) => r.data),
-  getTeacherFacultyOptions: (institutionId: number, departmentId: number) =>
+  getTeacherFacultyOptions: (institutionId: number, departmentId: number, semester: number) =>
     api.get<Array<{ id: number; name: string }>>('/views/teacher/faculty', {
       params: {
         institution_id: institutionId,
         department_id: departmentId,
+        semester,
       },
     }).then((r) => r.data),
-  getTeacherTimetable: (institutionId: number, departmentId: number, facultyId: number) =>
+  getTeacherTimetable: (institutionId: number, departmentId: number, semester: number, facultyId: number) =>
     api.get<ViewerTimetable>('/views/teacher', {
       params: {
         institution_id: institutionId,
         department_id: departmentId,
+        semester,
         faculty_id: facultyId,
       },
     }).then((r) => r.data),
@@ -347,7 +387,11 @@ export const API = {
     `/api/timetables/${timetableId}/export/pdf`,
   sendWhatsApp: (data: WhatsAppSendPayload) =>
     api.post<WhatsAppSendResponse>('/notifications/whatsapp/send', data).then((r) => r.data),
+  sendWhatsAppToSections: (data: WhatsAppSectionSendPayload) =>
+    api.post<WhatsAppSectionSendResponse>('/notifications/whatsapp/send-to-sections', data).then((r) => r.data),
 
   parseConstraint: (institutionId: number, text: string) =>
-    api.post('/nlp/parse-constraint', { institution_id: institutionId, text }).then((r) => r.data),
+    api.post<NLPConstraintResponse>('/nlp/parse-constraint', { institution_id: institutionId, text }).then((r) => r.data),
+  executeConstraint: (institutionId: number, text: string) =>
+    api.post<NLPExecuteResponse>('/nlp/execute', { institution_id: institutionId, text }).then((r) => r.data),
 }

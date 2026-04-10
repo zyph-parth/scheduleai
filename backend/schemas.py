@@ -140,8 +140,10 @@ class CombinedGroupOut(CombinedGroupCreate):
 # ─── Timetable Generation ─────────────────────────────────────────────────────
 class GenerateRequest(BaseModel):
     institution_id: int
+    department_id: Optional[int] = None
     name: str = "Semester Timetable"
-    semester: str = ""
+    semester: Optional[int] = Field(default=None, ge=1)
+    source_timetable_id: Optional[int] = None
     locked_slots: List[Dict[str, Any]] = Field(default_factory=list)
     max_solve_seconds: int = Field(default=60, ge=1, le=300)
 
@@ -228,6 +230,7 @@ class SlotOut(BaseModel):
     timetable_id: int
     section_id: Optional[int]
     section_ids: List[int]
+    section_labels: List[str] = []
     course_id: int
     faculty_id: int
     room_id: Optional[int]

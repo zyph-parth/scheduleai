@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { API, type Timetable, type Slot, type Institution } from '../api/client'
+import { API, type Timetable, type Slot, type Institution, type TimetableMeta } from '../api/client'
 import toast from 'react-hot-toast'
 import {
-  Download, Lock, LockOpen, Filter, RefreshCw,
+  Lock, LockOpen, Filter, RefreshCw,
   AlertTriangle, CheckCircle2, FileSpreadsheet, FileText,
-  X, Clock, MapPin, User, BookOpen, ChevronDown, Layers
+  X, Clock, MapPin, User, BookOpen, Layers
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -58,17 +58,58 @@ function formatTime(startTime: string, period: number, durationMinutes: number) 
   return { start: fmt(startMin), end: fmt(endMin) }
 }
 
+function getSlotSectionBindings(slot: Slot): Array<{ id: number; label: string }> {
+  const sectionIds = slot.section_ids?.length
+    ? slot.section_ids
+    : slot.section_id != null
+      ? [slot.section_id]
+      : []
+  const sectionLabels = slot.section_labels || []
+
+  return sectionIds.map((sectionId, index) => ({
+    id: sectionId,
+    label: sectionLabels[index] || (sectionIds.length === 1 ? slot.section_name || `Section ${sectionId}` : `Section ${sectionId}`),
+  }))
+}
+
+function getSlotSectionLabel(slot: Slot) {
+  const bindings = getSlotSectionBindings(slot)
+  if (!bindings.length) return slot.section_name || 'Unassigned'
+  return bindings.map((binding) => binding.label).join(' + ')
+}
+
 export default function TimetablePage() {
   const loc = useLocation()
-  const [timetables, setTimetables] = useState<any[]>([])
+  const [timetables, setTimetables] = useState<TimetableMeta[]>([])
   const [selTtId, setSelTtId] = useState<number | null>((loc.state as any)?.ttId ?? null)
   const [tt, setTt] = useState<Timetable | null>(null)
   const [loading, setLoading] = useState(false)
-  const [filterSec, setFilterSec] = useState<string>('all')
+  const [regenerating, setRegenerating] = useState(false)
+  const [filterSec, setFilterSec] = useState<number | 'all'>('all')
   const [selSlot, setSelSlot] = useState<Slot | null>(null)
   const [subs, setSubs] = useState<any[]>([])
   const [institutions, setInstitutions] = useState<Institution[]>([])
   const [selInst, setSelInst] = useState<number | null>(null)
+
+  const loadTimetables = async (institutionId: number) => {
+    const data = await API.listTimetables(institutionId)
+    setTimetables(data)
+    setSelTtId((current) => {
+      if (current && data.some((item) => item.id === current)) {
+        return current
+      }
+      const preferred = data.find((item) => ['done', 'optimal', 'feasible'].includes(item.status)) || data[0]
+      return preferred?.id ?? null
+    })
+    return data
+  }
+
+  const refreshTimetable = async (timetableId: number) => {
+    const detail = await API.getTimetable(timetableId)
+    setTt(detail)
+    setSelSlot((current) => (current ? detail.slots.find((slot) => slot.id === current.id) || null : null))
+    return detail
+  }
 
   useEffect(() => {
     API.getInstitutions().then(d => {
@@ -79,25 +120,30 @@ export default function TimetablePage() {
 
   useEffect(() => {
     if (!selInst) return
-    API.listTimetables(selInst).then(d => {
-      setTimetables(d)
-      if (!selTtId && d.length) {
-        const done = d.find((t: any) => t.status === 'done')
-        if (done) setSelTtId(done.id)
-      }
-    })
+    loadTimetables(selInst).catch(() => toast.error('Failed to load timetables'))
   }, [selInst])
 
   useEffect(() => {
-    if (!selTtId) return
+    if (!selTtId) {
+      setTt(null)
+      setSelSlot(null)
+      setSubs([])
+      return
+    }
     setLoading(true)
-    API.getTimetable(selTtId)
-      .then(setTt)
+    refreshTimetable(selTtId)
       .catch(() => toast.error('Failed to load timetable'))
       .finally(() => setLoading(false))
   }, [selTtId])
 
-  const inst = institutions.find(i => i.id === selInst)
+  useEffect(() => {
+    if (tt?.institution_id && tt.institution_id !== selInst) {
+      setSelInst(tt.institution_id)
+    }
+  }, [tt?.institution_id, selInst])
+
+  const activeInstitutionId = tt?.institution_id ?? selInst
+  const inst = institutions.find(i => i.id === activeInstitutionId)
   const startTime = inst?.start_time || '09:00'
   const periodDur = inst?.period_duration_minutes || 50
   const workingDays = inst?.working_days || [0, 1, 2, 3, 4]
@@ -108,26 +154,60 @@ export default function TimetablePage() {
     new Set(Object.values(periodsPerDay).flat())
   ).sort((a, b) => a - b)
 
-  const sections = Array.from(
-    new Set((tt?.slots || []).map(s => s.section_name).filter(Boolean))
-  ).sort()
-
-  const filteredSlots = (tt?.slots || []).filter(s =>
-    filterSec === 'all' || s.section_name === filterSec
+  const sections = useMemo(
+    () => {
+      const entries = new Map<number, string>()
+      for (const slot of tt?.slots || []) {
+        for (const binding of getSlotSectionBindings(slot)) {
+          if (!entries.has(binding.id)) {
+            entries.set(binding.id, binding.label)
+          }
+        }
+      }
+      return Array.from(entries.entries())
+        .map(([id, label]) => ({ id, label }))
+        .sort((a, b) => a.label.localeCompare(b.label))
+    },
+    [tt],
   )
 
-  const slotGrid: Record<number, Record<number, Slot[]>> = {}
-  for (const d of workingDays) {
-    slotGrid[d] = {}
-    for (const p of allPeriods) {
-      slotGrid[d][p] = []
+  useEffect(() => {
+    if (filterSec !== 'all' && !sections.some((section) => section.id === filterSec)) {
+      setFilterSec('all')
     }
-  }
-  for (const s of filteredSlots) {
-    if (slotGrid[s.day]?.[s.period]) {
-      slotGrid[s.day][s.period].push(s)
+  }, [filterSec, sections])
+
+  const filteredSlots = useMemo(
+    () => (tt?.slots || []).filter((slot) =>
+      filterSec === 'all' || getSlotSectionBindings(slot).some((binding) => binding.id === filterSec)
+    ),
+    [filterSec, tt],
+  )
+
+  const slotGrid = useMemo(() => {
+    const grid: Record<number, Record<number, Slot[]>> = {}
+    for (const day of workingDays) {
+      grid[day] = {}
+      for (const period of allPeriods) {
+        grid[day][period] = []
+      }
     }
-  }
+    for (const slot of filteredSlots) {
+      const span = Math.max(slot.duration || 1, 1)
+      for (let offset = 0; offset < span; offset += 1) {
+        const period = slot.period + offset
+        if (grid[slot.day]?.[period]) {
+          grid[slot.day][period].push(slot)
+        }
+      }
+    }
+    return grid
+  }, [allPeriods, filteredSlots, workingDays])
+
+  const lockedSlotCount = useMemo(
+    () => (tt?.slots || []).filter((slot) => slot.is_locked).length,
+    [tt],
+  )
 
   const isBreak = (day: number, period: number): boolean => {
     const breaks = breakSlots[String(day)] || []
@@ -142,22 +222,67 @@ export default function TimetablePage() {
   const handleSlotClick = async (slot: Slot) => {
     setSelSlot(slot)
     if (selTtId) {
-      const response = await API.findSubstitutes(selTtId, slot.id).catch(() => ({ candidates: [] }))
-      setSubs(response?.candidates || [])
+      const response = await API.findSubstitutes(selTtId, slot.id).catch(() => [])
+      setSubs(Array.isArray(response) ? response : response?.candidates || [])
     }
   }
 
   const lockSlot = async (slotId: number) => {
     await API.lockSlot(slotId)
     toast.success('Lock toggled')
-    if (selTtId) API.getTimetable(selTtId).then(setTt)
+    if (selTtId) await refreshTimetable(selTtId)
   }
 
   const substitute = async (slotId: number, facId: number) => {
     await API.substituteSlot(slotId, { slot_id: slotId, substitute_faculty_id: facId })
     toast.success('Substitution applied')
     setSelSlot(null)
-    if (selTtId) API.getTimetable(selTtId).then(setTt)
+    if (selTtId) await refreshTimetable(selTtId)
+  }
+
+  const regenerateFromLocked = async () => {
+    if (!tt) {
+      toast.error('Select a timetable first')
+      return
+    }
+    if (!tt.institution_id || !tt.department_id || !tt.semester_number) {
+      toast.error('This timetable is missing department or semester scope')
+      return
+    }
+    if (!lockedSlotCount) {
+      toast.error('Lock at least one slot before regenerating')
+      return
+    }
+
+    setRegenerating(true)
+    const loadingToast = toast.loading('Regenerating around locked slots...')
+    try {
+      const response = await API.generateTimetable({
+        institution_id: tt.institution_id,
+        department_id: tt.department_id,
+        semester: tt.semester_number,
+        name: `${tt.name} (Regenerated)`,
+        source_timetable_id: tt.id,
+        max_solve_seconds: 60,
+      })
+      await loadTimetables(tt.institution_id)
+      toast.dismiss(loadingToast)
+
+      if (response?.timetable_id) {
+        setSelTtId(response.timetable_id)
+      }
+
+      if (['done', 'optimal', 'feasible'].includes(response.status)) {
+        toast.success(`Generated ${response.num_slots} slots with ${response.locked_slots_used ?? lockedSlotCount} locked anchors`)
+      } else {
+        toast.error(`Solver returned: ${response.status}`)
+      }
+    } catch {
+      toast.dismiss(loadingToast)
+      toast.error('Locked regeneration failed')
+    } finally {
+      setRegenerating(false)
+    }
   }
 
   return (
@@ -173,6 +298,14 @@ export default function TimetablePage() {
         <div className="flex gap-2 flex-wrap">
           {selTtId && (
             <>
+              <button
+                onClick={regenerateFromLocked}
+                disabled={regenerating || !lockedSlotCount}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-[#E4E7EF] bg-white text-sm font-medium text-[#0F172A] hover:bg-[#F1F5F9] transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <RefreshCw className={clsx('w-4 h-4 text-[#1B4FD8]', regenerating && 'animate-spin')} />
+                {lockedSlotCount ? `Regenerate (${lockedSlotCount} locked)` : 'Lock slots to regenerate'}
+              </button>
               {/* Export buttons – outlined style matching screenshot's secondary actions */}
               <a
                 href={API.exportExcel(selTtId)}
@@ -253,12 +386,12 @@ export default function TimetablePage() {
               <Layers className="w-3.5 h-3.5" /> All Sections
             </span>
           </button>
-          {sections.map(s => {
-            const active = filterSec === s
+          {sections.map((section) => {
+            const active = filterSec === section.id
             return (
               <button
-                key={s}
-                onClick={() => setFilterSec(s!)}
+                key={section.id}
+                onClick={() => setFilterSec(section.id)}
                 className={clsx(
                   'px-4 py-2 rounded-lg text-sm font-medium transition-all duration-150 border',
                   active
@@ -266,7 +399,7 @@ export default function TimetablePage() {
                     : 'bg-white text-[#64748B] border-[#E4E7EF] hover:text-[#0F172A] hover:border-[#CBD5E1]'
                 )}
               >
-                {s}
+                {section.label}
               </button>
             )
           })}
@@ -431,9 +564,9 @@ export default function TimetablePage() {
                                           {slot.is_locked && (
                                             <Lock className="w-2.5 h-2.5 text-white/70" />
                                           )}
-                                          {slot.section_name && (
+                                          {getSlotSectionBindings(slot).length > 0 && (
                                             <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-black/15 text-white font-bold tracking-wide">
-                                              {slot.section_name}
+                                              {getSlotSectionLabel(slot)}
                                             </span>
                                           )}
                                         </div>
@@ -528,16 +661,14 @@ export default function TimetablePage() {
                   </div>
                 </div>
 
-                {selSlot.section_name && (
+                {getSlotSectionBindings(selSlot).length > 0 && (
                   <div className="flex items-center gap-3 p-3 rounded-lg bg-[#F8F9FC] border border-[#E4E7EF]">
                     <div className="w-8 h-8 rounded-lg bg-[#F0F9FF] flex items-center justify-center">
                       <Layers className="w-4 h-4 text-[#0284C7]" />
                     </div>
                     <div>
                       <p className="text-[10px] text-[#94A3B8] uppercase tracking-wider font-semibold">Section</p>
-                      <p className="text-sm text-[#0F172A] font-medium">
-                        {selSlot.is_combined ? selSlot.section_ids?.join(', ') : selSlot.section_name}
-                      </p>
+                      <p className="text-sm text-[#0F172A] font-medium">{getSlotSectionLabel(selSlot)}</p>
                     </div>
                   </div>
                 )}

@@ -33,6 +33,7 @@ from schemas import (
     CombinedGroupCreate, CombinedGroupOut,
     GenerateRequest, WhatIfRequest, SubstituteRequest,
     NLPConstraintRequest, NLPConstraintResponse,
+    NLPExecuteRequest, NLPExecuteResponse,
     WhatsAppSendRequest, WhatsAppSendResponse,
     WhatsAppSectionSendRequest, WhatsAppSectionSendResponse,
     SlotOut, TimetableOut, AnalyticsOut,
@@ -40,6 +41,7 @@ from schemas import (
 from solver.engine import solve_timetable
 from services.nlp_service import parse_nlp_constraint
 from services.export_service import export_excel, export_pdf
+from services.timetable_service import annotate_occurrences_from_slots
 from services.whatsapp_service import build_whatsapp_service
 
 logging.basicConfig(level=logging.INFO)
@@ -209,10 +211,143 @@ def _ensure_no_slot_usage(db: Session, entity_name: str, **filters: Any) -> None
         raise _bad_request(f"Cannot delete {entity_name} because it is already used in a timetable")
 
 
-def _validate_generation_readiness(institution_id: int, db: Session) -> None:
+def _resolve_generation_scope(
+    institution_id: int,
+    db: Session,
+    department_id: Optional[int] = None,
+    semester: Optional[int] = None,
+) -> Dict[str, Any]:
     inst = _get_institution(db, institution_id)
-    departments = db.query(Department).filter(Department.institution_id == institution_id).all()
-    sections = db.query(Section).join(Department).filter(Department.institution_id == institution_id).all()
+    departments = (
+        db.query(Department)
+        .filter(Department.institution_id == institution_id)
+        .order_by(Department.name.asc())
+        .all()
+    )
+
+    dept: Optional[Department] = None
+    if department_id is not None:
+        dept = _get_department(db, department_id)
+        if dept.institution_id != inst.id:
+            raise _bad_request("Department must belong to the selected institution")
+    elif len(departments) == 1:
+        dept = departments[0]
+    elif len(departments) > 1:
+        raise _bad_request("Select a branch/department before generating a timetable")
+
+    section_query = db.query(Section).join(Department).filter(Department.institution_id == institution_id)
+    if dept is not None:
+        section_query = section_query.filter(Section.department_id == dept.id)
+    sections = section_query.all()
+
+    resolved_semester = semester
+    if resolved_semester is None:
+        semesters = sorted({section.semester for section in sections})
+        if len(semesters) == 1:
+            resolved_semester = semesters[0]
+        elif len(semesters) > 1:
+            raise _bad_request("Select a semester before generating a timetable")
+    elif sections and not any(section.semester == resolved_semester for section in sections):
+        scope_label = dept.name if dept is not None else inst.name
+        raise _bad_request(f"No sections found for semester {resolved_semester} in {scope_label}")
+
+    return {
+        "institution": inst,
+        "department": dept,
+        "semester": resolved_semester,
+    }
+
+
+def _get_sections_for_scope(
+    institution_id: int,
+    db: Session,
+    department_id: Optional[int] = None,
+    semester: Optional[int] = None,
+) -> List[Section]:
+    query = db.query(Section).join(Department).filter(Department.institution_id == institution_id)
+    if department_id is not None:
+        query = query.filter(Section.department_id == department_id)
+    if semester is not None:
+        query = query.filter(Section.semester == semester)
+    return query.all()
+
+
+def _get_combined_groups_for_scope(
+    institution_id: int,
+    section_ids: List[int],
+    db: Session,
+) -> List[CombinedGroup]:
+    allowed_section_ids = set(section_ids)
+    if not allowed_section_ids:
+        return []
+
+    groups = db.query(CombinedGroup).filter(CombinedGroup.institution_id == institution_id).all()
+    return [
+        group
+        for group in groups
+        if set(group.section_ids or []).issubset(allowed_section_ids)
+    ]
+
+
+def _build_generation_scope_metadata(
+    department: Optional[Department],
+    semester: Optional[int],
+) -> Dict[str, Any]:
+    return {
+        "department_id": department.id if department is not None else None,
+        "department_name": department.name if department is not None else None,
+        "semester": semester,
+    }
+
+
+def _scope_label_from_metadata(scope: Dict[str, Any], fallback_semester: str = "") -> str:
+    parts: List[str] = []
+    if scope.get("department_name"):
+        parts.append(str(scope["department_name"]))
+    if scope.get("semester") is not None:
+        parts.append(f"Semester {scope['semester']}")
+    if parts:
+        return " - ".join(parts)
+    if (fallback_semester or "").strip():
+        return fallback_semester.strip()
+    return "Institution-wide"
+
+
+def _timetable_matches_scope(
+    timetable: Timetable,
+    department_id: Optional[int] = None,
+    semester: Optional[int] = None,
+) -> bool:
+    scope = (timetable.metadata_ or {}).get("generation_scope") or {}
+    if department_id is not None and scope.get("department_id") not in (None, department_id):
+        return False
+    if semester is not None and scope.get("semester") not in (None, semester):
+        return False
+    return True
+
+
+def _validate_generation_readiness(
+    institution_id: int,
+    db: Session,
+    department_id: Optional[int] = None,
+    semester: Optional[int] = None,
+) -> Dict[str, Any]:
+    scope = _resolve_generation_scope(
+        institution_id,
+        db,
+        department_id=department_id,
+        semester=semester,
+    )
+    inst = scope["institution"]
+    dept = scope["department"]
+
+    departments = [dept] if dept is not None else db.query(Department).filter(Department.institution_id == institution_id).all()
+    sections = _get_sections_for_scope(
+        institution_id,
+        db,
+        department_id=dept.id if dept is not None else None,
+        semester=scope["semester"],
+    )
     faculty = db.query(Faculty).filter(Faculty.institution_id == institution_id).all()
     rooms = db.query(Room).filter(Room.institution_id == institution_id).all()
 
@@ -220,7 +355,12 @@ def _validate_generation_readiness(institution_id: int, db: Session) -> None:
     if not departments:
         issues.append("Add at least one department")
     if not sections:
-        issues.append("Add at least one section")
+        if dept is not None and scope["semester"] is not None:
+            issues.append(f"Add at least one section in {dept.name}, semester {scope['semester']}")
+        elif dept is not None:
+            issues.append(f"Add at least one section in {dept.name}")
+        else:
+            issues.append("Add at least one section")
     if not faculty:
         issues.append("Add at least one faculty member")
     if not rooms:
@@ -228,9 +368,9 @@ def _validate_generation_readiness(institution_id: int, db: Session) -> None:
 
     section_ids = [section.id for section in sections]
     assignments = db.query(SectionCourse).filter(SectionCourse.section_id.in_(section_ids)).all() if section_ids else []
-    combined_groups = db.query(CombinedGroup).filter(CombinedGroup.institution_id == institution_id).all()
+    combined_groups = _get_combined_groups_for_scope(institution_id, section_ids, db)
     if not assignments and not combined_groups:
-        issues.append("Add at least one section-course assignment or combined group")
+        issues.append("Add at least one section-course assignment or combined group in the selected scope")
 
     assigned_section_ids = {assignment.section_id for assignment in assignments}
     for group in combined_groups:
@@ -240,15 +380,20 @@ def _validate_generation_readiness(institution_id: int, db: Session) -> None:
         issues.append(f"Assign courses to every section. Missing: {', '.join(missing_sections[:5])}")
 
     if not any(room.room_type == "lab" for room in rooms):
-        practical_courses = db.query(Course).join(Department).filter(
-            Department.institution_id == institution_id,
-            Course.practical_hours > 0,
-        ).all()
+        scoped_course_ids = {assignment.course_id for assignment in assignments}
+        scoped_course_ids.update(group.course_id for group in combined_groups)
+        practical_courses = (
+            db.query(Course)
+            .filter(Course.id.in_(scoped_course_ids), Course.practical_hours > 0)
+            .all()
+            if scoped_course_ids else []
+        )
         if practical_courses:
             issues.append("Add at least one lab room for courses with practical hours")
 
     if issues:
         raise _bad_request("; ".join(issues))
+    return scope
 
 
 def _slot_fits_schedule(
@@ -339,19 +484,163 @@ def _build_nlp_context(institution_id: int, db: Session) -> Dict[str, Any]:
     }
 
 
-def _get_latest_done_timetable(institution_id: int, db: Session) -> Timetable:
-    timetable = (
+def _find_faculty_for_nlp(institution_id: int, faculty_name: str, db: Session) -> Optional[Faculty]:
+    target = _normalize_name(faculty_name).lower()
+    if not target:
+        return None
+
+    faculty = db.query(Faculty).filter(Faculty.institution_id == institution_id).all()
+    exact_matches = []
+    fuzzy_matches = []
+    target_tail = target.split()[-1]
+
+    for member in faculty:
+        normalized = _normalize_name(member.name).lower()
+        if not normalized:
+            continue
+        if normalized == target:
+            exact_matches.append(member)
+        elif target in normalized or normalized in target:
+            fuzzy_matches.append(member)
+        else:
+            member_tail = normalized.split()[-1]
+            if target_tail and member_tail == target_tail:
+                fuzzy_matches.append(member)
+
+    return (exact_matches or fuzzy_matches or [None])[0]
+
+
+def _expand_unavailability_slots(parsed: Dict[str, Any], institution: Institution) -> List[Dict[str, int]]:
+    selected_days = [int(parsed["day"])] if parsed.get("day") is not None else list(institution.working_days or [])
+    requested_period = parsed.get("period")
+    before_period = parsed.get("before_period")
+    after_period = parsed.get("after_period")
+    slots: List[Dict[str, int]] = []
+
+    for day in selected_days:
+        periods = [
+            int(period)
+            for period in (institution.periods_per_day or {}).get(str(day), (institution.periods_per_day or {}).get(day, []))
+        ]
+        if requested_period is not None:
+            if int(requested_period) in periods:
+                slots.append({"day": day, "period": int(requested_period)})
+            continue
+        if before_period is not None:
+            slots.extend({"day": day, "period": period} for period in periods if period < int(before_period))
+            continue
+        if after_period is not None:
+            slots.extend({"day": day, "period": period} for period in periods if period > int(after_period))
+            continue
+        slots.extend({"day": day, "period": period} for period in periods)
+
+    deduped = {
+        (slot["day"], slot["period"]): slot
+        for slot in slots
+    }
+    return [deduped[key] for key in sorted(deduped)]
+
+
+def _execute_nlp_constraint(body: NLPExecuteRequest, parsed: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    action_type = str(parsed.get("type") or "custom")
+    faculty_name = parsed.get("faculty_name") or ""
+    faculty = _find_faculty_for_nlp(body.institution_id, faculty_name, db) if faculty_name else None
+
+    if action_type == "unavailability":
+        if faculty is None:
+            return {
+                "action_type": action_type,
+                "executed": False,
+                "description": "No matching faculty member was found for this unavailability rule.",
+                "result": {},
+            }
+
+        institution = _get_institution(db, body.institution_id)
+        slots = _expand_unavailability_slots(parsed, institution)
+        if not slots:
+            return {
+                "action_type": action_type,
+                "executed": False,
+                "description": "This rule did not resolve to any valid periods in the institution schedule.",
+                "result": {"faculty_id": faculty.id, "faculty_name": faculty.name},
+            }
+
+        existing = {
+            (int(slot["day"]), int(slot["period"]))
+            for slot in (faculty.unavailable_slots or [])
+        }
+        for slot in slots:
+            existing.add((slot["day"], slot["period"]))
+        faculty.unavailable_slots = [
+            {"day": day, "period": period}
+            for day, period in sorted(existing)
+        ]
+        db.commit()
+        return {
+            "action_type": action_type,
+            "executed": True,
+            "description": f"Updated unavailable periods for {faculty.name}.",
+            "result": {
+                "faculty_id": faculty.id,
+                "faculty_name": faculty.name,
+                "blocked_slots_added": len(slots),
+                "total_unavailable_slots": len(faculty.unavailable_slots or []),
+            },
+        }
+
+    if action_type == "max_consecutive":
+        max_periods = parsed.get("max_periods")
+        if faculty is None or max_periods is None:
+            return {
+                "action_type": action_type,
+                "executed": False,
+                "description": "This max-consecutive rule needs a matching faculty member and a period limit.",
+                "result": {},
+            }
+
+        faculty.max_consecutive_periods = max(1, int(max_periods))
+        db.commit()
+        return {
+            "action_type": action_type,
+            "executed": True,
+            "description": f"Updated the max consecutive load for {faculty.name}.",
+            "result": {
+                "faculty_id": faculty.id,
+                "faculty_name": faculty.name,
+                "max_consecutive_periods": faculty.max_consecutive_periods,
+            },
+        }
+
+    return {
+        "action_type": action_type,
+        "executed": False,
+        "description": "This constraint type can be parsed, but it is not yet executable from setup.",
+        "result": {},
+    }
+
+
+def _get_latest_done_timetable(
+    institution_id: int,
+    db: Session,
+    department_id: Optional[int] = None,
+    semester: Optional[int] = None,
+) -> Timetable:
+    timetables = (
         db.query(Timetable)
         .filter(
             Timetable.institution_id == institution_id,
             Timetable.status == "done",
         )
         .order_by(Timetable.created_at.desc(), Timetable.id.desc())
-        .first()
+        .all()
     )
-    if not timetable:
-        raise HTTPException(404, "No completed timetable found for this institution")
-    return timetable
+    for timetable in timetables:
+        if _timetable_matches_scope(timetable, department_id=department_id, semester=semester):
+            return timetable
+
+    if department_id is not None or semester is not None:
+        raise HTTPException(404, "No completed timetable found for the selected scope")
+    raise HTTPException(404, "No completed timetable found for this institution")
 
 
 def _serialize_view_payload(tt: Timetable, slots: List[Slot], db: Session, **extra: Any) -> Dict[str, Any]:
@@ -743,14 +1032,17 @@ def create_section(body: SectionCreate, db: Session = Depends(get_db)):
     duplicate = db.query(Section).filter(
         Section.department_id == dept.id,
         Section.name == name,
+        Section.semester == body.semester,
     ).first()
     if duplicate:
-        raise _bad_request("A section with this name already exists in the department")
+        raise _bad_request("A section with this name already exists in the department for the selected semester")
     sec = Section(
         department_id=dept.id,
         name=name,
         student_count=body.student_count,
         semester=body.semester,
+        class_representative_name=_normalize_name(body.class_representative_name),
+        class_representative_phone=(body.class_representative_phone or "").strip(),
     )
     db.add(sec); db.commit(); db.refresh(sec)
     return sec
@@ -758,7 +1050,12 @@ def create_section(body: SectionCreate, db: Session = Depends(get_db)):
 
 @app.get("/sections", response_model=List[SectionOut])
 def list_sections(department_id: int = Query(...), db: Session = Depends(get_db)):
-    return db.query(Section).filter(Section.department_id == department_id).all()
+    return (
+        db.query(Section)
+        .filter(Section.department_id == department_id)
+        .order_by(Section.semester.asc(), Section.name.asc(), Section.id.asc())
+        .all()
+    )
 
 
 @app.put("/sections/{section_id}", response_model=SectionOut)
@@ -772,13 +1069,16 @@ def update_section(section_id: int, body: SectionCreate, db: Session = Depends(g
     duplicate = db.query(Section).filter(
         Section.department_id == section.department_id,
         Section.name == name,
+        Section.semester == body.semester,
         Section.id != section_id,
     ).first()
     if duplicate:
-        raise _bad_request("A section with this name already exists in the department")
+        raise _bad_request("A section with this name already exists in the department for the selected semester")
     section.name = name
     section.student_count = body.student_count
     section.semester = body.semester
+    section.class_representative_name = _normalize_name(body.class_representative_name)
+    section.class_representative_phone = (body.class_representative_phone or "").strip()
     db.commit(); db.refresh(section)
     return section
 
@@ -931,28 +1231,46 @@ def delete_combined_group(cg_id: int, db: Session = Depends(get_db)):
 # Timetable generation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_solver_input(institution_id: int, db: Session, locked_slots=None, max_seconds=60):
+def _build_solver_input(
+    institution_id: int,
+    db: Session,
+    locked_slots=None,
+    max_seconds=60,
+    department_id: Optional[int] = None,
+    semester: Optional[int] = None,
+):
     """Assemble the full solver input dict from DB records."""
-    inst = db.query(Institution).filter(Institution.id == institution_id).first()
-    if not inst:
-        raise HTTPException(404, "Institution not found")
+    scope = _resolve_generation_scope(
+        institution_id,
+        db,
+        department_id=department_id,
+        semester=semester,
+    )
+    inst = scope["institution"]
+    dept = scope["department"]
+    resolved_semester = scope["semester"]
 
-    sections = db.query(Section).join(Department).filter(
-        Department.institution_id == institution_id
-    ).all()
+    sections = _get_sections_for_scope(
+        institution_id,
+        db,
+        department_id=dept.id if dept is not None else None,
+        semester=resolved_semester,
+    )
     section_ids = [s.id for s in sections]
 
-    courses_raw = db.query(Course).join(Department).filter(
-        Department.institution_id == institution_id
-    ).all()
-    faculty_raw = db.query(Faculty).filter(Faculty.institution_id == institution_id).all()
-    rooms_raw   = db.query(Room).filter(Room.institution_id == institution_id).all()
-    sc_raw      = db.query(SectionCourse).filter(
+    sc_raw = db.query(SectionCourse).filter(
         SectionCourse.section_id.in_(section_ids)
-    ).all()
-    cg_raw      = db.query(CombinedGroup).filter(
-        CombinedGroup.institution_id == institution_id
-    ).all()
+    ).all() if section_ids else []
+    cg_raw = _get_combined_groups_for_scope(institution_id, section_ids, db)
+
+    course_ids = {sc.course_id for sc in sc_raw}
+    course_ids.update(cg.course_id for cg in cg_raw)
+    faculty_ids = {sc.faculty_id for sc in sc_raw}
+    faculty_ids.update(cg.faculty_id for cg in cg_raw)
+
+    courses_raw = db.query(Course).filter(Course.id.in_(course_ids)).all() if course_ids else []
+    faculty_raw = db.query(Faculty).filter(Faculty.id.in_(faculty_ids)).all() if faculty_ids else []
+    rooms_raw   = db.query(Room).filter(Room.institution_id == institution_id).all()
 
     return {
         "institution": {
@@ -1035,9 +1353,29 @@ def _save_schedule(timetable_id: int, result: dict, db: Session, mark_modified_s
 
 def _enrich_slots(slots, db: Session) -> List[dict]:
     """Add human-readable names to slot dicts for the frontend."""
+    section_ids = {
+        section_id
+        for slot in slots
+        for section_id in _slot_section_ids(slot)
+    }
+    section_name_map = {
+        section_id: name
+        for section_id, name in (
+            db.query(Section.id, Section.name).filter(Section.id.in_(section_ids)).all()
+            if section_ids
+            else []
+        )
+    }
+
     result = []
     for sl in slots:
         d = {c.name: getattr(sl, c.name) for c in sl.__table__.columns}
+        scoped_section_ids = _slot_section_ids(sl)
+        d["section_ids"] = scoped_section_ids
+        d["section_labels"] = [
+            section_name_map.get(section_id, f"Section {section_id}")
+            for section_id in scoped_section_ids
+        ]
         if sl.slot_type == "break":
             d["course_name"] = "Break Lecture"
             d["faculty_name"] = "No substitute available"
@@ -1046,13 +1384,10 @@ def _enrich_slots(slots, db: Session) -> List[dict]:
             d["course_name"]  = sl.course.name  if sl.course  else ""
             d["faculty_name"] = sl.faculty.name if sl.faculty else ""
             d["room_name"]    = sl.room.name    if sl.room     else "TBD"
-        if sl.is_combined and sl.section_ids:
-            names = [
-                name for (name,) in db.query(Section.name).filter(Section.id.in_(sl.section_ids)).all()
-            ]
-            d["section_name"] = " + ".join(names)
+        if sl.is_combined and scoped_section_ids:
+            d["section_name"] = " + ".join(d["section_labels"])
         else:
-            d["section_name"] = sl.section.name if sl.section else ""
+            d["section_name"] = d["section_labels"][0] if d["section_labels"] else (sl.section.name if sl.section else "")
         result.append(d)
     return result
 
@@ -1068,6 +1403,59 @@ def _slot_occupied_periods(slot: Slot, periods_per_day: Dict[Any, List[int]]) ->
 
     start_idx = ordered_periods.index(slot.period)
     return ordered_periods[start_idx:start_idx + duration]
+
+
+def _slot_section_ids(slot_like: Any) -> List[int]:
+    if hasattr(slot_like, "get"):
+        section_ids = slot_like.get("section_ids") or []
+        section_id = slot_like.get("section_id")
+    else:
+        section_ids = getattr(slot_like, "section_ids", None) or []
+        section_id = getattr(slot_like, "section_id", None)
+
+    cleaned = [int(section_id) for section_id in section_ids if section_id is not None]
+    if not cleaned and section_id is not None:
+        cleaned = [int(section_id)]
+    return cleaned
+
+
+def _slot_matches_section(slot_like: Any, section_id: int) -> bool:
+    return section_id in _slot_section_ids(slot_like)
+
+
+def _get_scoped_sections_for_timetable(tt: Timetable, db: Session) -> List[Section]:
+    scope = (tt.metadata_ or {}).get("generation_scope") or {}
+    return _get_sections_for_scope(
+        tt.institution_id,
+        db,
+        department_id=scope.get("department_id"),
+        semester=scope.get("semester"),
+    )
+
+
+def _build_locked_slots_from_timetable(tt: Timetable) -> List[Dict[str, Any]]:
+    occurrences = annotate_occurrences_from_slots(tt.slots)
+    locked_slots: List[Dict[str, Any]] = []
+
+    for slot in tt.slots:
+        if not slot.is_locked or slot.slot_type == "break":
+            continue
+        section_ids = _slot_section_ids(slot)
+        if not section_ids:
+            continue
+        locked_slots.append(
+            {
+                "section_id": section_ids[0],
+                "section_ids": section_ids,
+                "course_id": slot.course_id,
+                "type": slot.slot_type,
+                "occurrence": occurrences.get(slot.id, 0),
+                "day": slot.day,
+                "period": slot.period,
+            }
+        )
+
+    return locked_slots
 
 
 def _faculty_subject_match(course: Optional[Course], faculty: Faculty) -> bool:
@@ -1197,11 +1585,43 @@ def _copy_slot_to_timetable(
 
 @app.post("/timetables/generate")
 def generate_timetable(body: GenerateRequest, db: Session = Depends(get_db)):
-    _validate_generation_readiness(body.institution_id, db)
+    scope = _validate_generation_readiness(
+        body.institution_id,
+        db,
+        department_id=body.department_id,
+        semester=body.semester,
+    )
+    scope_metadata = _build_generation_scope_metadata(scope["department"], scope["semester"])
+    default_name_parts = []
+    if scope["department"] is not None:
+        default_name_parts.append(scope["department"].name)
+    if scope["semester"] is not None:
+        default_name_parts.append(f"Semester {scope['semester']}")
+    default_name = " - ".join(default_name_parts + ["Timetable"]) if default_name_parts else "Semester Timetable"
+
+    locked_slots = list(body.locked_slots or [])
+    source_timetable = None
+    if body.source_timetable_id is not None:
+        source_timetable = db.query(Timetable).filter(Timetable.id == body.source_timetable_id).first()
+        if not source_timetable:
+            raise HTTPException(404, "Source timetable not found")
+        if source_timetable.institution_id != body.institution_id:
+            raise _bad_request("Source timetable must belong to the selected institution")
+        if not _timetable_matches_scope(
+            source_timetable,
+            department_id=scope["department"].id if scope["department"] is not None else None,
+            semester=scope["semester"],
+        ):
+            raise _bad_request("Source timetable does not match the selected branch and semester")
+        if not locked_slots:
+            locked_slots = _build_locked_slots_from_timetable(source_timetable)
+
     solver_input = _build_solver_input(
         body.institution_id, db,
-        locked_slots=body.locked_slots,
+        locked_slots=locked_slots,
         max_seconds=body.max_solve_seconds,
+        department_id=scope["department"].id if scope["department"] is not None else None,
+        semester=scope["semester"],
     )
 
     result = solve_timetable(solver_input)
@@ -1209,10 +1629,16 @@ def generate_timetable(body: GenerateRequest, db: Session = Depends(get_db)):
     status = result.get("status", "error")
     tt = Timetable(
         institution_id = body.institution_id,
-        name           = _normalize_name(body.name) or "Semester Timetable",
-        semester       = body.semester,
+        name           = _normalize_name(body.name) or default_name,
+        semester       = f"Semester {scope['semester']}" if scope["semester"] is not None else "",
         status         = "done" if status in ("optimal", "feasible") else status,
         solve_time     = result.get("solve_time", 0),
+        metadata_      = {
+            "generation_scope": scope_metadata,
+            "source_timetable_id": source_timetable.id if source_timetable is not None else None,
+            "source_timetable_name": source_timetable.name if source_timetable is not None else None,
+            "locked_slot_count": len(locked_slots),
+        },
     )
     db.add(tt); db.commit(); db.refresh(tt)
 
@@ -1223,6 +1649,7 @@ def generate_timetable(body: GenerateRequest, db: Session = Depends(get_db)):
         "status":        tt.status,
         "solve_time":    tt.solve_time,
         "num_slots":     len(result.get("schedule", [])),
+        "locked_slots_used": len(locked_slots),
         "conflicts":     result.get("conflicts", []),
         "objective":     result.get("objective", 0),
     }
@@ -1239,6 +1666,13 @@ def list_timetables(institution_id: int = Query(...), db: Session = Depends(get_
             "status": t.status, "solve_time": t.solve_time,
             "created_at": str(t.created_at),
             "slot_count": len(t.slots),
+            "department_id": ((t.metadata_ or {}).get("generation_scope") or {}).get("department_id"),
+            "department_name": ((t.metadata_ or {}).get("generation_scope") or {}).get("department_name"),
+            "semester_number": ((t.metadata_ or {}).get("generation_scope") or {}).get("semester"),
+            "scope_label": _scope_label_from_metadata(
+                ((t.metadata_ or {}).get("generation_scope") or {}),
+                fallback_semester=t.semester,
+            ),
         }
         for t in tts
     ]
@@ -1250,12 +1684,19 @@ def get_timetable(tt_id: int, db: Session = Depends(get_db)):
     if not tt:
         raise HTTPException(404, "Timetable not found")
     slots = _enrich_slots(tt.slots, db)
+    scope = (tt.metadata_ or {}).get("generation_scope") or {}
     return {
         "id":         tt.id,
+        "institution_id": tt.institution_id,
+        "institution_name": tt.institution.name if tt.institution else "",
         "name":       tt.name,
         "semester":   tt.semester,
         "status":     tt.status,
         "solve_time": tt.solve_time,
+        "department_id": scope.get("department_id"),
+        "department_name": scope.get("department_name"),
+        "semester_number": scope.get("semester"),
+        "scope_label": _scope_label_from_metadata(scope, fallback_semester=tt.semester),
         "slots":      slots,
         "violations": [
             {"type": v.constraint_type, "description": v.description, "severity": v.severity}
@@ -1283,11 +1724,16 @@ def get_student_view(
     if section.semester != semester:
         raise _bad_request("Section does not belong to the selected semester")
 
-    tt = _get_latest_done_timetable(inst.id, db)
+    tt = _get_latest_done_timetable(
+        inst.id,
+        db,
+        department_id=dept.id,
+        semester=semester,
+    )
     slots = [
         slot
         for slot in tt.slots
-        if slot.section_id == section.id
+        if _slot_matches_section(slot, section.id)
     ]
 
     return _serialize_view_payload(
@@ -1306,6 +1752,7 @@ def get_student_view(
 def list_teacher_view_faculty(
     institution_id: int = Query(...),
     department_id: int = Query(...),
+    semester: int = Query(...),
     db: Session = Depends(get_db),
 ):
     inst = _get_institution(db, institution_id)
@@ -1313,24 +1760,26 @@ def list_teacher_view_faculty(
     if dept.institution_id != inst.id:
         raise _bad_request("Department must belong to the selected institution")
 
+    scoped_sections = _get_sections_for_scope(
+        inst.id,
+        db,
+        department_id=dept.id,
+        semester=semester,
+    )
+    scoped_section_ids = [section.id for section in scoped_sections]
+
     faculty_ids = {
         faculty_id
         for (faculty_id,) in db.query(SectionCourse.faculty_id)
         .join(Section, Section.id == SectionCourse.section_id)
-        .filter(Section.department_id == dept.id)
+        .filter(Section.id.in_(scoped_section_ids))
         .distinct()
         .all()
-    }
+    } if scoped_section_ids else set()
     faculty_ids.update(
         faculty_id
-        for (faculty_id,) in db.query(CombinedGroup.faculty_id)
-        .join(Course, Course.id == CombinedGroup.course_id)
-        .filter(
-            CombinedGroup.institution_id == inst.id,
-            Course.department_id == dept.id,
-        )
-        .distinct()
-        .all()
+        for group in _get_combined_groups_for_scope(inst.id, scoped_section_ids, db)
+        for faculty_id in [group.faculty_id]
     )
 
     faculty = db.query(Faculty).filter(Faculty.id.in_(faculty_ids)).order_by(Faculty.name.asc()).all() if faculty_ids else []
@@ -1344,6 +1793,7 @@ def list_teacher_view_faculty(
 def get_teacher_view(
     institution_id: int = Query(...),
     department_id: int = Query(...),
+    semester: int = Query(...),
     faculty_id: int = Query(...),
     db: Session = Depends(get_db),
 ):
@@ -1358,12 +1808,22 @@ def get_teacher_view(
 
     valid_faculty_ids = {
         item["id"]
-        for item in list_teacher_view_faculty(institution_id=inst.id, department_id=dept.id, db=db)
+        for item in list_teacher_view_faculty(
+            institution_id=inst.id,
+            department_id=dept.id,
+            semester=semester,
+            db=db,
+        )
     }
     if faculty.id not in valid_faculty_ids:
-        raise _bad_request("Selected faculty does not teach in the selected department")
+        raise _bad_request("Selected faculty does not teach in the selected department and semester")
 
-    tt = _get_latest_done_timetable(inst.id, db)
+    tt = _get_latest_done_timetable(
+        inst.id,
+        db,
+        department_id=dept.id,
+        semester=semester,
+    )
     slots = [
         slot
         for slot in tt.slots
@@ -1376,6 +1836,7 @@ def get_teacher_view(
         db,
         department_id=dept.id,
         department_name=dept.name,
+        semester=semester,
         faculty_id=faculty.id,
         faculty_name=faculty.name,
     )
@@ -1420,6 +1881,7 @@ def what_if(body: WhatIfRequest, db: Session = Depends(get_db)):
         semester       = tt.semester,
         status         = "done",
         solve_time     = 0,
+        metadata_      = tt.metadata_,
     )
     db.add(new_tt); db.commit(); db.refresh(new_tt)
 
@@ -1545,79 +2007,75 @@ def get_analytics(tt_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404)
 
     slots = tt.slots
-    inst  = tt.institution
-    working_days = inst.working_days
-    ppd = inst.periods_per_day or {}
-    all_periods  = sorted({p for ps in ppd.values() for p in (ps or [])})
-    total_slots  = len(working_days) * max(len(all_periods), 1)
+    inst = tt.institution
+    working_days = inst.working_days or []
+    periods_per_day = inst.periods_per_day or {}
+    total_periods_per_room = sum(
+        len(periods_per_day.get(str(day), periods_per_day.get(day, [])) or [])
+        for day in working_days
+    )
 
-    # Faculty load
     faculty_hours: Dict[int, int] = {}
-    for sl in slots:
-        if sl.slot_type == "break" or not sl.faculty_id:
-            continue
-        faculty_hours[sl.faculty_id] = faculty_hours.get(sl.faculty_id, 0) + sl.duration
-    fac_load = []
-    for f_id, hrs in faculty_hours.items():
-        fac = db.query(Faculty).filter(Faculty.id == f_id).first()
-        fac_load.append({
-            "faculty_id": f_id,
-            "faculty_name": fac.name if fac else str(f_id),
-            "hours_per_week": hrs,
-            "wellbeing_score": min(100, max(0, 100 - abs(hrs - 18) * 3)),
-        })
-    fac_load.sort(key=lambda x: -x["hours_per_week"])
-
-    # Room utilization
     room_usage: Dict[int, int] = {}
-    for sl in slots:
-        if sl.room_id:
-            room_usage[sl.room_id] = room_usage.get(sl.room_id, 0) + sl.duration
-    rooms_db = db.query(Room).filter(Room.institution_id == inst.id).all()
-    room_util = []
-    for r in rooms_db:
-        used = room_usage.get(r.id, 0)
-        room_util.append({
-            "room_id":     r.id,
-            "room_name":   r.name,
-            "room_type":   r.room_type,
-            "used_periods": used,
-            "total_periods": total_slots,
-            "utilization_pct": round(used / max(total_slots, 1) * 100, 1),
-        })
-
-    # Section gaps (free periods between first and last class per day)
-    section_gaps: Dict[int, int] = {}
-    for sl in slots:
-        s_id = sl.section_id
-        if s_id:
-            section_gaps[s_id] = section_gaps.get(s_id, 0)  # placeholder
-
-    DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    sections_db = db.query(Section).join(Department).filter(
-        Department.institution_id == inst.id
-    ).all()
-    sec_gaps_list = []
-    for sec in sections_db:
-        sec_slots = [sl for sl in slots if sl.section_id == sec.id and sl.slot_type != "break"]
-        gaps = 0
-        for d in working_days:
-            day_periods = sorted({sl.period for sl in sec_slots if sl.day == d})
-            if len(day_periods) >= 2:
-                gaps += day_periods[-1] - day_periods[0] - len(day_periods) + 1
-        sec_gaps_list.append({"section_id": sec.id, "section_name": sec.name, "total_gaps": gaps})
-
-    # Core subject distribution
+    section_daily_periods: Dict[int, Dict[int, set[int]]] = {}
     core_in_morning = 0
     core_total = 0
-    for sl in slots:
-        if sl.slot_type == "break" or not sl.course_id:
-            continue
-        c = db.query(Course).filter(Course.id == sl.course_id).first()
-        if c and c.is_core:
+
+    for slot in slots:
+        occupied_periods = _slot_occupied_periods(slot, periods_per_day)
+        if slot.slot_type != "break" and slot.faculty_id:
+            faculty_hours[slot.faculty_id] = faculty_hours.get(slot.faculty_id, 0) + len(occupied_periods)
+        if slot.room_id:
+            room_usage[slot.room_id] = room_usage.get(slot.room_id, 0) + len(occupied_periods)
+        if slot.slot_type != "break":
+            for section_id in _slot_section_ids(slot):
+                section_daily_periods.setdefault(section_id, {}).setdefault(slot.day, set()).update(occupied_periods)
+        if slot.slot_type != "break" and slot.course and slot.course.is_core:
             core_total += 1
-            if sl.period < 2:
+            if slot.period < 2:
                 core_in_morning += 1
+
+    fac_load = []
+    for faculty_id, hours in sorted(faculty_hours.items(), key=lambda item: item[1], reverse=True):
+        faculty = db.query(Faculty).filter(Faculty.id == faculty_id).first()
+        fac_load.append(
+            {
+                "faculty_id": faculty_id,
+                "faculty_name": faculty.name if faculty else str(faculty_id),
+                "hours_per_week": hours,
+                "wellbeing_score": min(100, max(0, 100 - abs(hours - 18) * 3)),
+            }
+        )
+
+    room_util = []
+    for room in db.query(Room).filter(Room.institution_id == inst.id).all():
+        used = room_usage.get(room.id, 0)
+        room_util.append(
+            {
+                "room_id": room.id,
+                "room_name": room.name,
+                "room_type": room.room_type,
+                "used_periods": used,
+                "total_periods": total_periods_per_room,
+                "utilization_pct": round(used / max(total_periods_per_room, 1) * 100, 1),
+            }
+        )
+
+    sec_gaps_list = []
+    for section in _get_scoped_sections_for_timetable(tt, db):
+        total_gaps = 0
+        for day in working_days:
+            day_periods = sorted(section_daily_periods.get(section.id, {}).get(day, set()))
+            if len(day_periods) >= 2:
+                total_gaps += day_periods[-1] - day_periods[0] + 1 - len(day_periods)
+        sec_gaps_list.append(
+            {
+                "section_id": section.id,
+                "section_name": section.name,
+                "total_gaps": total_gaps,
+            }
+        )
+
     core_dist = {
         "core_total": core_total,
         "core_in_morning": core_in_morning,
@@ -1654,6 +2112,21 @@ async def parse_constraint(body: NLPConstraintRequest, db: Session = Depends(get
 # ─────────────────────────────────────────────────────────────────────────────
 # Export
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/nlp/execute", response_model=NLPExecuteResponse)
+async def execute_constraint(body: NLPExecuteRequest, db: Session = Depends(get_db)):
+    context = _build_nlp_context(body.institution_id, db)
+    parsed = await parse_nlp_constraint(body.text, settings.ANTHROPIC_API_KEY, context)
+    execution = _execute_nlp_constraint(body, parsed, db)
+    return {
+        "original_text": body.text,
+        "parsed": parsed,
+        "action_type": execution["action_type"],
+        "executed": execution["executed"],
+        "description": execution["description"],
+        "result": execution.get("result", {}),
+    }
+
 
 @app.get("/timetables/{tt_id}/export/excel")
 def export_timetable_excel(tt_id: int, db: Session = Depends(get_db)):

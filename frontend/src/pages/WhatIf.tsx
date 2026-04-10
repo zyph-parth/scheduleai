@@ -7,64 +7,98 @@ import {
 } from 'lucide-react'
 import clsx from 'clsx'
 
-const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+function getSlotSectionBindings(slot: any): Array<{ id: number; label: string }> {
+  const sectionIds = Array.isArray(slot.section_ids) && slot.section_ids.length
+    ? slot.section_ids
+    : slot.section_id != null
+      ? [slot.section_id]
+      : []
+  const sectionLabels = Array.isArray(slot.section_labels) ? slot.section_labels : []
+
+  return sectionIds.map((sectionId: number, index: number) => ({
+    id: sectionId,
+    label: sectionLabels[index] || (sectionIds.length === 1 ? slot.section_name || `Section ${sectionId}` : `Section ${sectionId}`),
+  }))
+}
+
+function getSlotSectionLabel(slot: any) {
+  const bindings = getSlotSectionBindings(slot)
+  if (!bindings.length) return slot.section_name || 'Unassigned'
+  return bindings.map((binding) => binding.label).join(' + ')
+}
 
 export default function WhatIf() {
   const [institutions, setInstitutions] = useState<any[]>([])
-  const [timetables,   setTimetables]   = useState<any[]>([])
-  const [faculty,      setFaculty]      = useState<any[]>([])
-  const [selInst,      setSelInst]      = useState<number | null>(null)
-  const [selTtId,      setSelTtId]      = useState<number | null>(null)
-  const [selFac,       setSelFac]       = useState<number | null>(null)
-  const [selDays,      setSelDays]      = useState<number[]>([])
-  const [loading,      setLoading]      = useState(false)
-  const [sending,      setSending]      = useState(false)
-  const [result,       setResult]       = useState<any>(null)
-  const [crNumber,     setCrNumber]     = useState('')
-  const [taNumber,     setTaNumber]     = useState('')
+  const [timetables, setTimetables] = useState<any[]>([])
+  const [faculty, setFaculty] = useState<any[]>([])
+  const [selInst, setSelInst] = useState<number | null>(null)
+  const [selTtId, setSelTtId] = useState<number | null>(null)
+  const [selFac, setSelFac] = useState<number | null>(null)
+  const [selDays, setSelDays] = useState<number[]>([])
+  const [loading, setLoading] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [result, setResult] = useState<any>(null)
+  const [taNumber, setTaNumber] = useState('')
 
-  useEffect(() => { API.getInstitutions().then(d => { setInstitutions(d); if (d.length) setSelInst(d[0].id) }) }, [])
+  useEffect(() => {
+    API.getInstitutions().then((data) => {
+      setInstitutions(data)
+      if (data.length) setSelInst(data[0].id)
+    })
+  }, [])
+
   useEffect(() => {
     if (!selInst) return
     API.listTimetables(selInst).then(setTimetables)
     API.getFaculty(selInst).then(setFaculty)
   }, [selInst])
 
-  const toggleDay = (d: number) =>
-    setSelDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d])
+  const toggleDay = (day: number) =>
+    setSelDays((prev) => (prev.includes(day) ? prev.filter((value) => value !== day) : [...prev, day]))
 
   const run = async () => {
     if (!selTtId || !selFac) return toast.error('Select a timetable and faculty member')
     setLoading(true)
     setResult(null)
-    const t = toast.loading('Running what-if analysis…')
+    const loadingToast = toast.loading('Running what-if analysis...')
     try {
-      const res = await API.whatIf({
+      const response = await API.whatIf({
         timetable_id: selTtId,
         absent_faculty_id: selFac,
         affected_days: selDays,
       })
-      toast.dismiss(t)
-      setResult(res)
-      if (res.status === 'done' || res.status === 'optimal' || res.status === 'feasible') {
+      toast.dismiss(loadingToast)
+      setResult(response)
+      if (response.status === 'done' || response.status === 'optimal' || response.status === 'feasible') {
         toast.success(
-          `Done! ${res.substituted_count ?? 0} substitute(s), ${res.break_count ?? 0} break(s) in ${res.solve_time}s`
+          `Done! ${response.substituted_count ?? 0} substitute(s), ${response.break_count ?? 0} break(s) in ${response.solve_time}s`
         )
       } else {
-        toast.error(`Status: ${res.status}`)
+        toast.error(`Status: ${response.status}`)
       }
-    } catch (e: any) {
-      toast.dismiss(t)
-      toast.error(e?.response?.data?.detail || 'What-If failed')
+    } catch (error: any) {
+      toast.dismiss(loadingToast)
+      toast.error(error?.response?.data?.detail || 'What-If failed')
     } finally {
       setLoading(false)
     }
   }
 
-  const modifiedSlots = (result?.slots || []).filter((s: any) => s.is_modified)
-  const stableSlots   = (result?.slots || []).filter((s: any) => !s.is_modified)
-  const selectedFac   = faculty.find(f => f.id === selFac)
-  const selectedTt    = timetables.find(t => t.id === selTtId)
+  const modifiedSlots = (result?.slots || []).filter((slot: any) => slot.is_modified)
+  const stableSlots = (result?.slots || []).filter((slot: any) => !slot.is_modified)
+  const selectedFac = faculty.find((item) => item.id === selFac)
+  const selectedTt = timetables.find((item) => item.id === selTtId)
+  const affectedSections: Array<{ id: number; label: string }> = []
+
+  for (const slot of modifiedSlots as any[]) {
+    for (const binding of getSlotSectionBindings(slot)) {
+      if (!affectedSections.some((section) => section.id === binding.id)) {
+        affectedSections.push(binding)
+      }
+    }
+  }
 
   const buildWhatsAppMessage = () => {
     if (!result || !selectedFac) return ''
@@ -80,69 +114,86 @@ export default function WhatIf() {
     ]
 
     const slotLines = modifiedSlots.slice(0, 5).map((slot: any) =>
-      `- ${slot.section_name}: ${slot.course_name} on ${DAYS[slot.day] || `Day ${slot.day + 1}`} P${slot.period + 1} with ${slot.faculty_name}`
+      `- ${getSlotSectionLabel(slot)}: ${slot.course_name} on ${DAYS[slot.day] || `Day ${slot.day + 1}`} P${slot.period + 1} with ${slot.faculty_name}`
     )
 
     if (modifiedSlots.length > 5) {
       slotLines.push(`- ${modifiedSlots.length - 5} more updated slot(s)`)
     }
 
-    return [...intro, '', 'Changed slots:', ...(slotLines.length ? slotLines : ['- No slot changes'])].join('\n')
+    const recipients = affectedSections.length
+      ? [`Affected sections: ${affectedSections.map((section) => section.label).join(', ')}`]
+      : ['Affected sections: none']
+
+    return [...intro, ...recipients, '', 'Changed slots:', ...(slotLines.length ? slotLines : ['- No slot changes'])].join('\n')
   }
 
   const sendWhatsApp = async () => {
     if (!result) return toast.error('Run what-if first')
     if (!selectedFac) return toast.error('Select a faculty member first')
-    if (!crNumber.trim() && !taNumber.trim()) return toast.error('Enter at least one mobile number')
+    if (!affectedSections.length && !taNumber.trim()) {
+      return toast.error('No affected sections or TA number available to notify')
+    }
 
     setSending(true)
-    const t = toast.loading('Sending WhatsApp message…')
+    const loadingToast = toast.loading('Sending WhatsApp updates...')
     try {
-      const numbers = [
-        { label: 'CR', value: crNumber.trim() },
-        { label: 'TA', value: taNumber.trim() },
-      ].filter((entry) => entry.value)
+      const jobs: Array<{ label: string; run: () => Promise<string> }> = []
 
-      const results = await Promise.allSettled(
-        numbers.map(async (entry) => ({
-          ...entry,
-          sid: (
-            await API.sendWhatsApp({
-              to_number: entry.value,
+      if (affectedSections.length) {
+        jobs.push({
+          label: 'sections',
+          run: async () => {
+            const response = await API.sendWhatsAppToSections({
+              section_ids: affectedSections.map((section) => section.id),
               message: buildWhatsAppMessage(),
             })
-          ).sid,
-        }))
-      )
+            if (response.sent_count > 0) {
+              return `Sections notified: ${response.sent_count} sent${response.skipped_count ? `, ${response.skipped_count} skipped` : ''}`
+            }
+            throw new Error(response.skipped[0]?.reason || 'No section notifications were sent')
+          },
+        })
+      }
 
-      const successes = results
-        .filter((result): result is PromiseFulfilledResult<{ label: string; value: string; sid: string }> => result.status === 'fulfilled')
-        .map((result) => result.value)
+      if (taNumber.trim()) {
+        jobs.push({
+          label: 'TA',
+          run: async () => {
+            const response = await API.sendWhatsApp({
+              to_number: taNumber.trim(),
+              message: buildWhatsAppMessage(),
+            })
+            return `TA notified${response.sid ? ` (${response.sid})` : ''}`
+          },
+        })
+      }
 
-      const failures = results
-        .map((result, index) => ({ result, entry: numbers[index] }))
-        .filter((item): item is { result: PromiseRejectedResult; entry: { label: string; value: string } } => item.result.status === 'rejected')
+      const results = await Promise.allSettled(jobs.map((job) => job.run()))
+      const successes: string[] = []
+      const failures: string[] = []
 
-      toast.dismiss(t)
+      results.forEach((resultItem, index) => {
+        if (resultItem.status === 'fulfilled') {
+          successes.push(resultItem.value)
+        } else {
+          failures.push(`${jobs[index].label}: ${getErrorMessage(resultItem.reason, 'delivery failed')}`)
+        }
+      })
+
+      toast.dismiss(loadingToast)
       if (!successes.length && failures.length) {
-        throw failures[0].result.reason
+        throw new Error(failures.join(' | '))
       }
-
-      if (successes.length && !failures.length) {
-        toast.success(
-          successes.length === 1
-            ? `WhatsApp sent to ${successes[0].label}${successes[0].sid ? ` (${successes[0].sid})` : ''}`
-            : `WhatsApp sent to ${successes.length} recipients`
-        )
-        return
+      if (successes.length) {
+        toast.success(successes.join(' | '))
       }
-
-      const failedLabels = failures.map((item) => item.entry.label).join(', ')
-      toast.success(`WhatsApp sent to ${successes.map((item) => item.label).join(', ')}`)
-      toast.error(`Failed for ${failedLabels}. Check that the number is valid and joined to the Twilio WhatsApp sandbox.`)
+      if (failures.length) {
+        toast.error(failures.join(' | '))
+      }
     } catch (error) {
-      toast.dismiss(t)
-      toast.error(getErrorMessage(error, 'Unable to send WhatsApp message'))
+      toast.dismiss(loadingToast)
+      toast.error(getErrorMessage(error, 'Unable to notify affected sections'))
     } finally {
       setSending(false)
     }
@@ -150,7 +201,6 @@ export default function WhatIf() {
 
   return (
     <div className="space-y-5 animate-fade-in">
-      {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-slate-50 flex items-center gap-2">
           <Zap className="w-6 h-6 text-amber-400" /> What-If Analysis
@@ -160,7 +210,6 @@ export default function WhatIf() {
         </p>
       </div>
 
-      {/* Story prompt */}
       <div className="glass p-5 border border-amber-500/20 bg-amber-500/5">
         <div className="flex items-start gap-3">
           <div className="w-8 h-8 rounded-lg bg-amber-500/20 flex items-center justify-center shrink-0 mt-0.5">
@@ -169,7 +218,7 @@ export default function WhatIf() {
           <div>
             <p className="font-semibold text-amber-300 text-sm">Demo scenario</p>
             <p className="text-slate-400 text-sm mt-1">
-              "It's the day before semester starts — Dr. Sharma just called in sick.
+              "It&apos;s the day before semester starts - Dr. Sharma just called in sick.
               Instead of rebuilding the entire timetable, mark them absent and watch
               only their slots get rescheduled in under 2 seconds."
             </p>
@@ -177,30 +226,29 @@ export default function WhatIf() {
         </div>
       </div>
 
-      {/* Controls */}
       <div className="glass p-5 space-y-4">
         <div className="grid grid-cols-3 gap-4">
           <div>
             <label className="label">Institution</label>
-            <select className="select" value={selInst ?? ''} onChange={e => setSelInst(Number(e.target.value))}>
-              <option value="" disabled>Select…</option>
-              {institutions.map(i => <option key={i.id} value={i.id}>{i.name}</option>)}
+            <select className="select" value={selInst ?? ''} onChange={(event) => setSelInst(Number(event.target.value))}>
+              <option value="" disabled>Select...</option>
+              {institutions.map((institution) => <option key={institution.id} value={institution.id}>{institution.name}</option>)}
             </select>
           </div>
           <div>
             <label className="label">Base Timetable</label>
-            <select className="select" value={selTtId ?? ''} onChange={e => setSelTtId(Number(e.target.value))}>
-              <option value="" disabled>Select timetable…</option>
-              {timetables.filter(t => t.status === 'done').map(t => (
-                <option key={t.id} value={t.id}>{t.name}</option>
+            <select className="select" value={selTtId ?? ''} onChange={(event) => setSelTtId(Number(event.target.value))}>
+              <option value="" disabled>Select timetable...</option>
+              {timetables.filter((timetable) => ['done', 'optimal', 'feasible'].includes(timetable.status)).map((timetable) => (
+                <option key={timetable.id} value={timetable.id}>{timetable.name}</option>
               ))}
             </select>
           </div>
           <div>
             <label className="label">Absent Faculty</label>
-            <select className="select" value={selFac ?? ''} onChange={e => setSelFac(Number(e.target.value))}>
-              <option value="" disabled>Select faculty…</option>
-              {faculty.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+            <select className="select" value={selFac ?? ''} onChange={(event) => setSelFac(Number(event.target.value))}>
+              <option value="" disabled>Select faculty...</option>
+              {faculty.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}
             </select>
           </div>
         </div>
@@ -208,15 +256,20 @@ export default function WhatIf() {
         {selFac && (
           <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
             <div>
-              <label className="label">CR Mobile Number</label>
-              <input
-                className="input"
-                value={crNumber}
-                onChange={e => setCrNumber(e.target.value)}
-                placeholder="+919876543210"
-              />
+              <label className="label">Section Notifications</label>
+              <div className="input min-h-[46px] flex flex-wrap gap-2 items-center">
+                {affectedSections.length > 0 ? (
+                  affectedSections.map((section) => (
+                    <span key={section.id} className="badge badge-amber">
+                      {section.label}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-slate-500 text-sm">Run the what-if flow to identify affected sections automatically.</span>
+                )}
+              </div>
               <p className="mt-1 text-xs text-slate-500">
-                The message will be sent to this WhatsApp number through your configured Twilio sender.
+                Messages will be sent to each section&apos;s saved class representative WhatsApp number from Setup.
               </p>
             </div>
             <div>
@@ -224,7 +277,7 @@ export default function WhatIf() {
               <input
                 className="input"
                 value={taNumber}
-                onChange={e => setTaNumber(e.target.value)}
+                onChange={(event) => setTaNumber(event.target.value)}
                 placeholder="+919876543210"
               />
               <p className="mt-1 text-xs text-slate-500">
@@ -235,11 +288,11 @@ export default function WhatIf() {
               <button
                 className="btn-secondary py-3 px-5"
                 onClick={sendWhatsApp}
-                disabled={sending || !result || (!crNumber.trim() && !taNumber.trim())}
+                disabled={sending || !result || (!affectedSections.length && !taNumber.trim())}
               >
                 {sending
-                  ? <><span className="spinner w-4 h-4" />Sending…</>
-                  : <><MessageCircle className="w-4 h-4" />Send WhatsApp</>}
+                  ? <><span className="spinner w-4 h-4" />Sending...</>
+                  : <><MessageCircle className="w-4 h-4" />Send Updates</>}
               </button>
             </div>
           </div>
@@ -248,18 +301,18 @@ export default function WhatIf() {
         <div>
           <label className="label">Affected Days (leave empty = all days)</label>
           <div className="flex gap-2 flex-wrap">
-            {DAYS.map((d, i) => (
+            {DAYS.map((day, index) => (
               <button
-                key={d}
-                onClick={() => toggleDay(i)}
+                key={day}
+                onClick={() => toggleDay(index)}
                 className={clsx(
                   'btn text-xs py-1.5 px-3',
-                  selDays.includes(i)
+                  selDays.includes(index)
                     ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 border'
                     : 'btn-secondary'
                 )}
               >
-                {d.slice(0, 3)}
+                {day.slice(0, 3)}
               </button>
             ))}
           </div>
@@ -272,7 +325,7 @@ export default function WhatIf() {
             disabled={loading || !selTtId || !selFac}
           >
             {loading
-              ? <><span className="spinner w-4 h-4" />Regenerating…</>
+              ? <><span className="spinner w-4 h-4" />Regenerating...</>
               : <><Zap className="w-4 h-4" />Run What-If</>}
           </button>
           {result && (
@@ -301,10 +354,8 @@ export default function WhatIf() {
         </div>
       </div>
 
-      {/* Results */}
       {result && (
         <div className="grid grid-cols-2 gap-5">
-          {/* Modified slots */}
           <div className="glass p-5">
             <div className="flex items-center gap-2 mb-4">
               <div className="w-3 h-3 rounded-full bg-red-400" />
@@ -316,19 +367,19 @@ export default function WhatIf() {
               <p className="text-slate-500 text-sm">No slots were rescheduled.</p>
             ) : (
               <div className="space-y-2">
-                {modifiedSlots.map((s: any) => (
-                  <div key={s.id} className="glass-sm p-3 border-l-2 border-red-400">
-                    <p className="text-sm font-semibold text-slate-200">{s.course_name}</p>
+                {modifiedSlots.map((slot: any) => (
+                  <div key={slot.id} className="glass-sm p-3 border-l-2 border-red-400">
+                    <p className="text-sm font-semibold text-slate-200">{slot.course_name}</p>
                     <div className="flex items-center gap-2 mt-1">
-                      <span className="text-xs text-slate-500">{s.section_name}</span>
+                      <span className="text-xs text-slate-500">{getSlotSectionLabel(slot)}</span>
                       <ArrowRight className="w-3 h-3 text-slate-600" />
                       <span className="text-xs text-slate-400">
-                        {DAYS[s.day]?.slice(0,3)} P{s.period + 1} · {s.room_name}
+                        {DAYS[slot.day]?.slice(0, 3)} P{slot.period + 1} - {slot.room_name}
                       </span>
                     </div>
                     <div className="flex items-center gap-1 mt-1">
                       <User className="w-3 h-3 text-amber-400" />
-                      <span className="text-xs text-amber-300">{s.faculty_name}</span>
+                      <span className="text-xs text-amber-300">{slot.faculty_name}</span>
                     </div>
                   </div>
                 ))}
@@ -336,7 +387,6 @@ export default function WhatIf() {
             )}
           </div>
 
-          {/* Stable slots summary */}
           <div className="glass p-5">
             <div className="flex items-center gap-2 mb-4">
               <div className="w-3 h-3 rounded-full bg-emerald-400" />
@@ -355,9 +405,9 @@ export default function WhatIf() {
             {result.conflicts.length > 0 && (
               <div className="mt-4 space-y-2">
                 <p className="text-xs font-semibold text-red-400">Conflicts:</p>
-                {result.conflicts.map((c: any, i: number) => (
-                  <div key={i} className="glass-sm p-2 border-l-2 border-red-500">
-                    <p className="text-xs text-slate-400">{c.description}</p>
+                {result.conflicts.map((conflict: any, index: number) => (
+                  <div key={index} className="glass-sm p-2 border-l-2 border-red-500">
+                    <p className="text-xs text-slate-400">{conflict.description}</p>
                   </div>
                 ))}
               </div>

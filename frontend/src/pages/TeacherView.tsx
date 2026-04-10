@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { API, getErrorMessage, type Department, type Institution, type Slot, type ViewerTimetable } from '../api/client'
+import { API, getErrorMessage, type Department, type Institution, type Section, type Slot, type ViewerTimetable } from '../api/client'
 import toast from 'react-hot-toast'
 import { BookOpen, Clock, DoorOpen, Search, Users } from 'lucide-react'
 import clsx from 'clsx'
@@ -26,9 +26,11 @@ function formatTimeRange(startTime: string, period: number, durationMinutes: num
 export default function TeacherView() {
   const [institutions, setInstitutions] = useState<Institution[]>([])
   const [departments, setDepartments] = useState<Department[]>([])
+  const [sections, setSections] = useState<Section[]>([])
   const [facultyOptions, setFacultyOptions] = useState<Array<{ id: number; name: string }>>([])
   const [selInst, setSelInst] = useState<number | null>(null)
   const [selDept, setSelDept] = useState<number | null>(null)
+  const [semester, setSemester] = useState<number | null>(null)
   const [selFaculty, setSelFaculty] = useState<number | null>(null)
   const [view, setView] = useState<ViewerTimetable | null>(null)
   const [loading, setLoading] = useState(false)
@@ -45,7 +47,9 @@ export default function TeacherView() {
   useEffect(() => {
     setView(null)
     setSelDept(null)
+    setSemester(null)
     setSelFaculty(null)
+    setSections([])
     setFacultyOptions([])
     if (!selInst) {
       setDepartments([])
@@ -61,18 +65,41 @@ export default function TeacherView() {
 
   useEffect(() => {
     setView(null)
+    setSemester(null)
     setSelFaculty(null)
+    setFacultyOptions([])
     if (!selInst || !selDept) {
+      setSections([])
+      return
+    }
+    API.getSections(selDept)
+      .then((data) => {
+        setSections(data)
+        const semesters = Array.from(new Set(data.map((section) => section.semester))).sort((a, b) => a - b)
+        if (semesters.length) setSemester(semesters[0])
+      })
+      .catch((error) => toast.error(getErrorMessage(error, 'Failed to load sections')))
+  }, [selInst, selDept])
+
+  useEffect(() => {
+    setView(null)
+    setSelFaculty(null)
+    if (!selInst || !selDept || !semester) {
       setFacultyOptions([])
       return
     }
-    API.getTeacherFacultyOptions(selInst, selDept)
+    API.getTeacherFacultyOptions(selInst, selDept, semester)
       .then((data) => {
         setFacultyOptions(data)
         if (data.length) setSelFaculty(data[0].id)
       })
       .catch((error) => toast.error(getErrorMessage(error, 'Failed to load teachers')))
-  }, [selInst, selDept])
+  }, [selInst, selDept, semester])
+
+  const semesterOptions = useMemo(
+    () => Array.from(new Set(sections.map((section) => section.semester))).sort((a, b) => a - b),
+    [sections],
+  )
 
   const slotsByDay = useMemo(() => {
     const grouped = new Map<number, Slot[]>()
@@ -87,13 +114,13 @@ export default function TeacherView() {
   }, [view])
 
   const submit = async () => {
-    if (!selInst || !selDept || !selFaculty) {
-      toast.error('Select institute, department, and teacher')
+    if (!selInst || !selDept || !semester || !selFaculty) {
+      toast.error('Select institute, department, semester, and teacher')
       return
     }
     setLoading(true)
     try {
-      const data = await API.getTeacherTimetable(selInst, selDept, selFaculty)
+      const data = await API.getTeacherTimetable(selInst, selDept, semester, selFaculty)
       setView(data)
     } catch (error) {
       toast.error(getErrorMessage(error, 'Failed to load teacher timetable'))
@@ -107,10 +134,10 @@ export default function TeacherView() {
     <div className="space-y-5 animate-fade-in">
       <div>
         <h1 className="text-2xl font-bold text-[#0F172A]">Teacher View</h1>
-        <p className="text-[#64748B] text-sm mt-0.5">Choose institute, department, and teacher name to view the latest completed weekly timetable.</p>
+        <p className="text-[#64748B] text-sm mt-0.5">Choose institute, department, semester, and teacher name to view the latest completed weekly timetable.</p>
       </div>
 
-      <div className="bg-white border border-[#E4E7EF] rounded-xl shadow-sm p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 items-end">
+      <div className="bg-white border border-[#E4E7EF] rounded-xl shadow-sm p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 items-end">
         <div>
           <label className="label-xs">Institute</label>
           <select className="select" value={selInst ?? ''} onChange={(event) => setSelInst(Number(event.target.value))}>
@@ -123,6 +150,13 @@ export default function TeacherView() {
           <select className="select" value={selDept ?? ''} onChange={(event) => setSelDept(Number(event.target.value))} disabled={!departments.length}>
             <option value="" disabled>Select department...</option>
             {departments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="label-xs">Semester</label>
+          <select className="select" value={semester ?? ''} onChange={(event) => setSemester(Number(event.target.value))} disabled={!semesterOptions.length}>
+            <option value="" disabled>Select semester...</option>
+            {semesterOptions.map((value) => <option key={value} value={value}>Semester {value}</option>)}
           </select>
         </div>
         <div>
@@ -142,6 +176,7 @@ export default function TeacherView() {
         <div className="bg-white border border-[#E4E7EF] rounded-xl shadow-sm p-4 flex flex-wrap gap-3">
           <span className="badge badge-info">{view.institution_name}</span>
           <span className="badge badge-success">{view.department_name}</span>
+          <span className="badge badge-warn">Semester {view.semester}</span>
           <span className="badge badge-info">{view.faculty_name}</span>
           <span className="badge badge-success">{view.timetable_name}</span>
         </div>
