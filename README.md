@@ -1,7 +1,18 @@
 # ScheduleAI
 
-  
+<p align="center">
+  <br>
+  <img src="https://img.shields.io/badge/Schedule-AI-6366f1?style=for-the-badge&logo=googlecalendar&logoColor=white" alt="Schedule AI" />
+  <img src="https://img.shields.io/badge/Solver-OR--Tools-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="OR-Tools" />
+  <img src="https://img.shields.io/badge/UI-React-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React" />
+</p>
 
+<p align="center">
+  <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-009688?style=flat&logo=fastapi&logoColor=white" alt="FastAPI" /></a>
+  <a href="https://react.dev/"><img src="https://img.shields.io/badge/React_18-61DAFB?style=flat&logo=react&logoColor=black" alt="React" /></a>
+  <a href="https://developers.google.com/optimization"><img src="https://img.shields.io/badge/OR--Tools-4285F4?style=flat&logo=google&logoColor=white" alt="OR-Tools" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python_3.11+-3776AB?style=flat&logo=python&logoColor=white" alt="Python" /></a>
+</p>
 
 ---
 
@@ -27,9 +38,7 @@ That’s the itch **ScheduleAI** scratches: not a lifeless spreadsheet you pray 
 
 ---
 
-
-
-`frontend/` · SPA · Vite · TypeScript · Tailwind  ·  `backend/` · FastAPI · SQLAlchemy · solver in `solver/engine.py`
+<p align="center"><code>frontend/</code> · SPA · Vite · TypeScript · Tailwind &nbsp;·&nbsp; <code>backend/</code> · FastAPI · SQLAlchemy · solver in <code>solver/engine.py</code></p>
 
 ---
 
@@ -61,18 +70,17 @@ That’s the itch **ScheduleAI** scratches: not a lifeless spreadsheet you pray 
 *For judges / reviewers — what each layer of the repo actually does.*
 
 
-| Piece                                  | What it is                                                                                                                                                                                                                                                                                                         |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `**frontend/`**                        | React + Vite + TypeScript + Tailwind SPA. **Pages:** Dashboard (generate + history), **Setup** (all master data + NLP box), **Timetable** (grid, lock, substitute, exports), **What-If** (absence simulation), **Analytics** (charts), **Student** / **Teacher** read-only views. API client: `src/api/client.ts`. |
-| `**backend/main.py`**                  | FastAPI app: CRUD for institutions → sections/courses/faculty/rooms/combined groups; **POST `/timetables/generate`**; what-if, slot lock/substitute, analytics, Excel/PDF, NLP parse, optional WhatsApp.                                                                                                           |
-| `**backend/solver/engine.py**`         | **OR-Tools CP-SAT**: flattens teaching demand into sessions (theory + 2-period labs + combined sections), hard constraints (no clashes, breaks, unavailability, locks), soft objective (core in morning), then greedy room assignment.                                                                             |
-| `**backend/models.py` · `schemas.py`** | SQLAlchemy entities + Pydantic request/response shapes.                                                                                                                                                                                                                                                            |
-| `**backend/services/**`                | `export_service` (Excel/PDF), `nlp_service` (parse constraints), `whatsapp_service` (Twilio), `timetable_service` (helpers).                                                                                                                                                                                       |
-| `**backend/seed.py**`                  | One-command demo dataset (institution, dept, sections, faculty, rooms, courses, combined group) so generation works immediately.                                                                                                                                                                                   |
-| **Tests**                              | `backend/tests/test_backend.py` — generation, overlaps, locks, what-if, analytics, exports.                                                                                                                                                                                                                        |
+| Piece | What it is |
+|:---|:---|
+| **`frontend/`** | React + Vite + TypeScript + Tailwind SPA. **Pages:** Dashboard (generate + history), **Setup** (master data + NLP), **Timetable** (grid, lock, substitute, exports), **What-If**, **Analytics**, **Student** / **Teacher** views. API: `src/api/client.ts`. |
+| **`backend/main.py`** | FastAPI: CRUD for institution graph; **POST `/timetables/generate`**; what-if; lock/substitute; analytics; Excel/PDF; NLP; optional WhatsApp. |
+| **`backend/solver/engine.py`** | **OR-Tools CP-SAT**: sessions (theory + 2-period labs + combined sections), hard constraints, soft objective (core in morning), greedy rooms. |
+| **`models.py` · `schemas.py`** | SQLAlchemy entities + Pydantic I/O. |
+| **`backend/services/`** | `export_service`, `nlp_service`, `whatsapp_service`, `timetable_service`. |
+| **`backend/seed.py`** | Demo dataset so you can generate immediately. |
+| **Tests** | `backend/tests/test_backend.py` — generation, overlaps, locks, what-if, analytics, exports. |
 
-
-**Run:** `cd backend && pip install -r requirements.txt && uvicorn main:app --reload --port 8000` · `cd frontend && npm i && npm run dev` — UI at `localhost:5173`, interactive API at `**localhost:8000/docs`**. Optional: `python seed.py` in `backend/` before generating from the Dashboard.
+**Run:** `cd backend && pip install -r requirements.txt && uvicorn main:app --reload --port 8000` · `cd frontend && npm i && npm run dev` — UI `http://localhost:5173`, API docs `http://localhost:8000/docs`. Optional: `python seed.py` in `backend/`.
 
 ---
 
@@ -258,7 +266,7 @@ scheduleai/
 | Area            | Capabilities                                                                |
 | --------------- | --------------------------------------------------------------------------- |
 | **Institution** | Working days, `periods_per_day`, `break_slots`, period length, `start_time` |
-| **Rooms**       | Capacity, type: `classroom` | `lab` | `lecture_hall`                        |
+| **Rooms**       | Capacity; type: `classroom`, `lab`, or `lecture_hall` |
 | **Faculty**     | Subjects, unavailable (day, period), `max_consecutive_periods`, contact     |
 | **Courses**     | Theory/practical hours, credits, core flag, lab requirement                 |
 | **Sections**    | Name, headcount, semester; optional class rep phone (WhatsApp broadcast)    |
