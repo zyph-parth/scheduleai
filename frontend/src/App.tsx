@@ -2,7 +2,7 @@ import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router
 import { Toaster } from 'react-hot-toast'
 import {
   LayoutDashboard, CalendarDays, Settings, BarChart3,
-  Zap, Users, ChevronRight, Sparkles, GraduationCap
+  Zap, Users, ChevronRight, GraduationCap
 } from 'lucide-react'
 import clsx from 'clsx'
 import Dashboard   from './pages/Dashboard'
@@ -12,6 +12,7 @@ import WhatIf      from './pages/WhatIf'
 import Analytics   from './pages/Analytics'
 import StudentView from './pages/StudentView'
 import TeacherView from './pages/TeacherView'
+import logo from './assets/scheduleai-logo.svg'
 
 const NAV = [
   { to: '/',          icon: LayoutDashboard, label: 'Dashboard'   },
@@ -31,7 +32,7 @@ function Sidebar() {
       {/* Logo */}
       <div className="app-sidebar-brand">
         <div className="app-sidebar-logo">
-          <Sparkles className="w-4 h-4 text-white" />
+          <img src={logo} alt="ScheduleAI logo" className="app-sidebar-logo-image" />
         </div>
         <div>
           <p className="text-sm font-bold text-slate-100">ScheduleAI</p>

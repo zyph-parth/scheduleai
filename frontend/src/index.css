@@ -361,9 +361,18 @@ tbody td {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 14px;
-  background: linear-gradient(135deg, #4f46e5 0%, #2563eb 100%);
-  box-shadow: 0 10px 20px rgba(37, 99, 235, 0.22);
+  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid #dbe3ef;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+}
+
+.app-sidebar-logo-image {
+  width: 2.25rem;
+  height: 2.25rem;
+  display: block;
+  object-fit: contain;
 }
 
 .app-sidebar-nav {
