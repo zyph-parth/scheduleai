@@ -75,30 +75,7 @@ Export and share with students and faculty
 
 ---
 
-## Quick start
 
-```bash
-# backend
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-
-# frontend
-cd frontend
-npm install
-npm run dev
-```
-
-Open the UI at `http://localhost:5173` and the API docs at `http://localhost:8000/docs`.
-
-For the fastest demo path:
-
-1. Run `python seed.py` inside `backend/`
-2. Open **Dashboard**
-3. Generate a timetable
-4. Explore **Timetable**, **What-If**, **Analytics**, **Student**, and **Teacher** views
-
----
 
 ## Table of contents
 
