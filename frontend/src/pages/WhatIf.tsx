@@ -103,21 +103,43 @@ export default function WhatIf() {
         { label: 'TA', value: taNumber.trim() },
       ].filter((entry) => entry.value)
 
-      const responses = await Promise.all(
-        numbers.map((entry) =>
-          API.sendWhatsApp({
-            to_number: entry.value,
-            message: buildWhatsAppMessage(),
-          }).then((response) => ({ ...entry, sid: response.sid }))
-        )
+      const results = await Promise.allSettled(
+        numbers.map(async (entry) => ({
+          ...entry,
+          sid: (
+            await API.sendWhatsApp({
+              to_number: entry.value,
+              message: buildWhatsAppMessage(),
+            })
+          ).sid,
+        }))
       )
 
+      const successes = results
+        .filter((result): result is PromiseFulfilledResult<{ label: string; value: string; sid: string }> => result.status === 'fulfilled')
+        .map((result) => result.value)
+
+      const failures = results
+        .map((result, index) => ({ result, entry: numbers[index] }))
+        .filter((item): item is { result: PromiseRejectedResult; entry: { label: string; value: string } } => item.result.status === 'rejected')
+
       toast.dismiss(t)
-      toast.success(
-        responses.length === 1
-          ? `WhatsApp sent to ${responses[0].label}${responses[0].sid ? ` (${responses[0].sid})` : ''}`
-          : `WhatsApp sent to ${responses.length} recipients`
-      )
+      if (!successes.length && failures.length) {
+        throw failures[0].result.reason
+      }
+
+      if (successes.length && !failures.length) {
+        toast.success(
+          successes.length === 1
+            ? `WhatsApp sent to ${successes[0].label}${successes[0].sid ? ` (${successes[0].sid})` : ''}`
+            : `WhatsApp sent to ${successes.length} recipients`
+        )
+        return
+      }
+
+      const failedLabels = failures.map((item) => item.entry.label).join(', ')
+      toast.success(`WhatsApp sent to ${successes.map((item) => item.label).join(', ')}`)
+      toast.error(`Failed for ${failedLabels}. Check that the number is valid and joined to the Twilio WhatsApp sandbox.`)
     } catch (error) {
       toast.dismiss(t)
       toast.error(getErrorMessage(error, 'Unable to send WhatsApp message'))
