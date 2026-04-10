@@ -1,7 +1,12 @@
 # ScheduleAI
 
+<p align="center"><strong>Smart campus · conflict-aware timetables · OR-Tools CP-SAT</strong></p>
+
 <p align="center">
-  <br>
+  <a href="https://github.com/zyph-parth/scheduleai/commits/main"><img src="https://img.shields.io/github/last-commit/zyph-parth/scheduleai/main?style=flat-square&label=last%20push%20to%20main" alt="Last commit on main" /></a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Schedule-AI-6366f1?style=for-the-badge&logo=googlecalendar&logoColor=white" alt="Schedule AI" />
   <img src="https://img.shields.io/badge/Solver-OR--Tools-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="OR-Tools" />
   <img src="https://img.shields.io/badge/UI-React-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React" />
@@ -12,6 +17,15 @@
   <a href="https://react.dev/"><img src="https://img.shields.io/badge/React_18-61DAFB?style=flat&logo=react&logoColor=black" alt="React" /></a>
   <a href="https://developers.google.com/optimization"><img src="https://img.shields.io/badge/OR--Tools-4285F4?style=flat&logo=google&logoColor=white" alt="OR-Tools" /></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python_3.11+-3776AB?style=flat&logo=python&logoColor=white" alt="Python" /></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/CP--SAT-Solve-22c55e?style=flat-square" alt="Solve" />
+  <img src="https://img.shields.io/badge/What--if-Simulate-3b82f6?style=flat-square" alt="What-if" />
+  <img src="https://img.shields.io/badge/Analytics-Insights-a855f7?style=flat-square" alt="Analytics" />
+  <img src="https://img.shields.io/badge/Export-Excel%20%7C%20PDF-f97316?style=flat-square" alt="Export" />
+  <img src="https://img.shields.io/badge/NLP-Constraints-14b8a6?style=flat-square" alt="NLP" />
+  <img src="https://img.shields.io/badge/Views-Student%20%7C%20Teacher-e11d48?style=flat-square" alt="Views" />
 </p>
 
 ---
@@ -26,14 +40,13 @@ That’s the itch **ScheduleAI** scratches: not a lifeless spreadsheet you pray 
 
 ### Why open this repo?
 
-
-|      |                                                                                                                                                                                            |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 🧩   | **“Is this mess even *solvable*?”** — Google **OR-Tools CP-SAT** either hands you a conflict-free grid or explains *why* the universe said no (overload, rooms, locks, labs…).             |
-| 🔁   | **“What if this professor disappears for two days?”** — **What-if** runs clone your timetable, hunt for **substitutes**, and turn dead ends into honest **breaks** instead of silent lies. |
-| 📊   | **“Are we *fair* to faculty and rooms?”** — **Analytics** turns the grid into load, utilization, gaps, and “core subjects in the morning” — so intuition gets a receipt.                   |
-| 🎓📱 | **“Who actually needs to *see* this?”** — Dedicated **student** and **teacher** views, **Excel/PDF**, and optional **WhatsApp** hooks — publish, don’t just print.                         |
-| 💬   | **“Can I just *say* the rule?”** — **NLP** parses plain English constraints (cloud or local fallback) — a teaser for how scheduling *could* feel in the future.                            |
+|     | Why it matters |
+| --- | -------------- |
+| 🧩 | **“Is this mess even *solvable*?”** — **OR-Tools CP-SAT** returns a grid *or* clear diagnostics (overload, rooms, locks, labs…). |
+| 🔁 | **“What if a professor is away?”** — **What-if** clones the timetable, finds **substitutes**, or marks honest **breaks**. |
+| 📊 | **“Are we fair to people and rooms?”** — **Analytics**: load, utilization, gaps, core-in-morning. |
+| 🎓 | **“Who needs to see this?”** — **Student** & **teacher** views, **Excel/PDF**, optional **WhatsApp**. |
+| 💬 | **“Can I say the rule in English?”** — **NLP** parses constraints (cloud + local fallback). |
 
 
 ---
@@ -44,23 +57,22 @@ That’s the itch **ScheduleAI** scratches: not a lifeless spreadsheet you pray 
 
 ## Table of contents
 
-
-| Section                                                 | What you’ll find                                       |
-| ------------------------------------------------------- | ------------------------------------------------------ |
-| **[What we built](#what-we-built)**                     | Product surface — what each part of the repo is        |
-| **[Visual architecture](#visual-architecture)**         | Mermaid diagrams (system, sequence, solver, scale-out) |
-| **[Differentiators](#differentiators)**                 | vs typical spreadsheet / lightweight tools             |
-| **[Scalability](#scalability-analysis)**                | Strengths, limits, production path                     |
-| **[Tech stack](#tech-stack)**                           | Libraries by layer                                     |
-| **[Features](#features-at-a-glance)**                   | Capabilities in compact tables                         |
-| **[Data model](#core-data-model)**                      | Main entities                                          |
-| **[Scheduling & solver](#scheduling-logic-and-solver)** | Sessions, hard/soft rules, rooms                       |
-| **[Frontend routes](#frontend-pages)**                  | Pages ↔ routes                                         |
-| **[Backend API](#backend-api)**                         | HTTP surface (collapsible detail)                      |
-| **[Environment](#environment-variables)**               | `.env` keys                                            |
-| **[Seed & workflows](#seed-data)**                      | Demo data and checklists                               |
-| **[Testing](#testing)**                                 | How to run tests                                       |
-| **[Reference](#exports--nlp--limitations)**             | Exports, NLP, validation, limits, troubleshooting      |
+|     | Section | What you’ll find |
+| --- | ------- | ---------------- |
+| 📦 | [**What we built**](#what-we-built) | Repo map — frontend, API, solver, services, tests |
+| 🏛️ | [**Visual architecture**](#visual-architecture) | Mermaid: system, sequence, solver, scale-out |
+| ✨ | [**Differentiators**](#differentiators) | vs spreadsheets / light schedulers |
+| 📈 | [**Scalability**](#scalability-analysis) | Strengths, ceilings, growth path |
+| 🧰 | [**Tech stack**](#tech-stack) | Libraries by layer |
+| ⚡ | [**Features**](#features-at-a-glance) | Setup + timetable lifecycle |
+| 🗃️ | [**Data model**](#core-data-model) | Core entities |
+| 🧮 | [**Scheduling & solver**](#scheduling-logic-and-solver) | Sessions, constraints, rooms |
+| 🖥️ | [**Frontend routes**](#frontend-pages) | Path → page |
+| 🔌 | [**Backend API**](#backend-api) | HTTP surface + examples |
+| 🔐 | [**Environment**](#environment-variables) | `.env` keys |
+| 🌱 | [**Seed & workflows**](#seed-data) | Demo data + checklist |
+| 🧪 | [**Testing**](#testing) | Run tests |
+| 📚 | [**Reference**](#exports-nlp-limitations) | Exports, NLP, validation, limits, fixes |
 
 
 ---
@@ -369,7 +381,7 @@ Diagnostics may include: section overload, faculty overload, no valid slot, room
 
 Base URL (local): `http://localhost:8000` — frontend uses `/api/...` via Vite proxy.
 
-Interactive docs: `**GET /docs`**, `**GET /redoc**`.
+Interactive docs: **GET** [`/docs`](http://localhost:8000/docs) · **GET** [`/redoc`](http://localhost:8000/redoc).
 
 **Health & CRUD (institution-scoped)**
 
@@ -560,4 +572,4 @@ Covers generation on seeded data, overlaps, locked slots, what-if, analytics, ex
 
 ## Summary
 
-**ScheduleAI** is an end-to-end **timetable platform**: validated CRUD, **CP-SAT** solving with diagnostics, **interactive** post-processing, **what-if** planning, **analytics**, **exports**, stakeholder **views**, optional **NLP** and **WhatsApp** hooks. For a demo: `**python seed.py`**, generate from the **Dashboard**, then explore **Timetable**, **What-If**, **Analytics**, and the read-only **Student** / **Teacher** pages.
+**ScheduleAI** is an end-to-end **timetable platform**: validated CRUD, **CP-SAT** solving with diagnostics, **interactive** post-processing, **what-if** planning, **analytics**, **exports**, stakeholder **views**, optional **NLP** and **WhatsApp** hooks. For a demo: run **`python seed.py`** in `backend/`, generate from the **Dashboard**, then explore **Timetable**, **What-If**, **Analytics**, and the read-only **Student** / **Teacher** pages.
